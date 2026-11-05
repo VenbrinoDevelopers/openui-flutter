@@ -37,6 +37,9 @@
     instead of reported as a bad statement.
   - A shared element reached through an alias is copied with its
     own statement id, so per-statement keys never collide.
+- Fixed two crashes found by independent review:
+  - Pie and Radial charts no longer crash when labels outnumber
+    values: the stacked legend pads missing shares with 0.
 - Deliberate difference, kept from before: lines that are not
   statements still report `parse-failed`; upstream silently skips
   them. Multi-line statements (e.g. a ternary split across lines)

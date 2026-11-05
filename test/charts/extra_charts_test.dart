@@ -52,6 +52,51 @@ root = PieChart(["A", "B"], ["x", 1])
     expect(find.text('B'), findsWidgets);
   });
 
+  testWidgets('pie chart with more labels than values renders instead of crashing', (tester) async {
+    // Regression (charts B1): the stacked legend indexed values by
+    // label position with no length guard, so a longer labels array
+    // threw RangeError and red-screened the whole answer.
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SingleChildScrollView(
+          child: OpenUIRenderer(
+            library: openUIStandardLibrary(),
+            response: '''
+root = PieChart(["A", "B", "C"], [1, 2])
+''',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    for (final label in ['A', 'B', 'C']) {
+      expect(find.text(label), findsWidgets);
+    }
+    // Padded shares read as 0, so percentages sum to 100%.
+    for (final pct in ['33.3%', '66.7%', '0.0%']) {
+      expect(find.text(pct), findsWidgets);
+    }
+  });
+
+  testWidgets('radial chart with more labels than values renders instead of crashing', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SingleChildScrollView(
+          child: OpenUIRenderer(
+            library: openUIStandardLibrary(),
+            response: '''
+root = RadialChart(["A", "B", "C"], [1, 2])
+''',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    for (final label in ['A', 'B', 'C']) {
+      expect(find.text(label), findsWidgets);
+    }
+  });
+
   testWidgets('radar chart with an empty series renders without crashing', (tester) async {
     await tester.pumpWidget(
       MaterialApp(

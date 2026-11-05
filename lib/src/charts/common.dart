@@ -150,7 +150,13 @@ class _StackedLegendState extends State<_StackedLegend> {
 
   @override
   Widget build(BuildContext context) {
-    final visibleTotal = [for (var i = 0; i < widget.values.length; i++) if (!widget.hidden.contains(i)) widget.values[i]].fold<double>(0, (a, b) => a + b);
+    // Labels and values can disagree in length (a hand-written
+    // program or two query arrays of different lengths). The
+    // painters and hit tests guard short values, but the legend rows
+    // index values by label position, so pad here: missing shares
+    // read as 0.
+    final values = [for (var i = 0; i < widget.labels.length; i++) i < widget.values.length ? widget.values[i] : 0.0];
+    final visibleTotal = [for (var i = 0; i < values.length; i++) if (!widget.hidden.contains(i)) values[i]].fold<double>(0, (a, b) => a + b);
     final showAll = _expanded || widget.labels.length <= 6;
     final shown = showAll ? widget.labels.length : 6;
     return Column(
@@ -167,7 +173,7 @@ class _StackedLegendState extends State<_StackedLegend> {
                 opacity: widget.hidden.contains(i) ? 0.3 : 1.0,
                 child: SizedBox(
                   height: 32,
-                  child: Row(children: [Container(width: 10, height: 10, color: _colorAt(widget.palette, i)), const SizedBox(width: 8), Expanded(child: Text(widget.labels[i])), Text(visibleTotal == 0 ? '0.0%' : '${(widget.values[i] / visibleTotal * 100).toStringAsFixed(1)}%')]),
+                  child: Row(children: [Container(width: 10, height: 10, color: _colorAt(widget.palette, i)), const SizedBox(width: 8), Expanded(child: Text(widget.labels[i])), Text(visibleTotal == 0 ? '0.0%' : '${(values[i] / visibleTotal * 100).toStringAsFixed(1)}%')]),
                 ),
               ),
             ),
