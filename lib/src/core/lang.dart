@@ -1304,6 +1304,16 @@ class _Evaluator {
       return null;
     }
     _recordEdge('\$$name');
+    // Cycle guard, mirroring evalStatement's _visiting guard: an
+    // element default evaluates live (not through the restricted
+    // path), so a component default that reads its own variable --
+    // directly or through other variables -- would recurse forever.
+    // Re-entry reads as null and records a cycle error.
+    if (!_visiting.add('\$$name')) {
+      _err(OpenUIError('cycle',
+          'Variable \$$name reads itself, directly or through other variables, so it has no value.'));
+      return null;
+    }
     // A top-level variable evaluation gets its own frame, so nested
     // resolutions are attributed to the variable. A nested call keeps
     // the outer frame: attributing inner edges to the outer parent
@@ -1338,6 +1348,7 @@ class _Evaluator {
       }
     }
     if (topLevel) _evalStack.removeLast();
+    _visiting.remove('\$$name');
     varDefaults[name] = v;
     // The default is computed (and cached) even when host state
     // provides a value, so later defaults read this default, not

@@ -40,6 +40,10 @@
 - Fixed two crashes found by independent review:
   - Pie and Radial charts no longer crash when labels outnumber
     values: the stacked legend pads missing shares with 0.
+  - A component default that reads its own variable (directly or
+    through other variables) now reports a `cycle` error instead
+    of overflowing the stack. Plain expression cycles were already
+    guarded by the restricted evaluation path above.
 - Deliberate difference, kept from before: lines that are not
   statements still report `parse-failed`; upstream silently skips
   them. Multi-line statements (e.g. a ternary split across lines)

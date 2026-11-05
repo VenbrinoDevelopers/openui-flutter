@@ -181,4 +181,34 @@ rows = [{"priority": "高"}, {"priority": "低"}]
     expect(library.prompt(), isNot(contains('SectionBlock(')));
     expect(library.prompt(), isNot(contains('FollowUpBlock(')));
   });
+
+  test('plain expression variable cycles do not crash', () {
+    // Already guarded by the restricted evaluation path (Lang 1.1);
+    // pinned so the element-default guard below is not mistaken for
+    // the only cycle protection.
+    final self = parseOpenUI('root = TextContent("hi")\n\$a = \$a\n', library);
+    expect(self.root, isNotNull);
+    final mutual =
+        parseOpenUI('root = TextContent("hi")\n\$a = \$b\n\$b = \$a\n', library);
+    expect(mutual.root, isNotNull);
+  });
+
+  test('component default variable cycles report a cycle error, no stack overflow', () {
+    // Regression (language B1): element defaults evaluate live, so a
+    // component default reading its own variable recursed forever.
+    final self = parseOpenUI(
+        'root = TextContent("hi")\n\$a = TextContent(\$a)\n', library);
+    expect(self.errors.map((e) => e.code), contains('cycle'));
+    final mutual = parseOpenUI(
+        'root = TextContent("hi")\n\$a = TextContent(\$b)\n\$b = TextContent(\$a)\n',
+        library);
+    expect(mutual.errors.map((e) => e.code), contains('cycle'));
+  });
+
+  test('non-cyclic variable defaults still evaluate', () {
+    final r = parseOpenUI(
+        'root = TextContent("hi")\n\$a = "x"\n\$b = \$a\n', library);
+    expect(r.root, isNotNull);
+    expect(r.errors, isEmpty);
+  });
 }
