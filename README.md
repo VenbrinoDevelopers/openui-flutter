@@ -2,7 +2,7 @@
 
 [English](./README.md) | [中文](./README.zh-CN.md)
 
-A pure-Dart Flutter renderer for OpenUI Lang 1.0 and the 82-component
+A pure-Dart Flutter renderer for OpenUI Lang 1.1 and the 82-component
 general GenUI library, aligned with `@openuidev/react-ui` 0.18.1. It
 parses Lang programs (including streamed, partial input) into an
 element tree and renders it with Flutter widgets. Charts are fully

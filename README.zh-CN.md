@@ -2,7 +2,7 @@
 
 [English](./README.md) | [中文](./README.zh-CN.md)
 
-OpenUI Lang 1.0 与 82 个通用 GenUI 组件的纯 Dart Flutter 渲染器，
+OpenUI Lang 1.1 与 82 个通用 GenUI 组件的纯 Dart Flutter 渲染器，
 对齐 `@openuidev/react-ui` 0.18.1。它把 Lang 程序（含流式未完成
 输入）解析成元素树，再用 Flutter widget 渲染。图表全部自绘；
 唯一的第三方依赖是负责 Markdown 的 `flutter_markdown_plus`。

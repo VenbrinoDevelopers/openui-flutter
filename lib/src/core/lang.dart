@@ -779,10 +779,10 @@ class OpenUILibrary {
       buf.writeln('- @Last(array: list) -> any — Last element');
       buf.writeln('- @Filter(array: list, field: string, operator: string, value: any) -> list — Keep items where field matches; operators: ==, !=, >, <, >=, <=, contains');
       buf.writeln('- @Sort(array: list, field: string, direction?: string) -> list — Sort by field; direction asc (default) or desc');
-      buf.writeln('- @Round(number: number, decimals?: number) -> number — Round to N decimal places');
-      buf.writeln('- @Abs(number: number) -> number — Absolute value');
-      buf.writeln('- @Floor(number: number) -> number — Round down');
-      buf.writeln('- @Ceil(number: number) -> number — Round up');
+      buf.writeln('- @Round(number: number | number[], decimals?: number) -> number | number[] — Round to N decimal places (a list rounds each element)');
+      buf.writeln('- @Abs(number: number | number[]) -> number | number[] — Absolute value (a list maps each element)');
+      buf.writeln('- @Floor(number: number | number[]) -> number | number[] — Round down (a list maps each element)');
+      buf.writeln('- @Ceil(number: number | number[]) -> number | number[] — Round up (a list maps each element)');
       buf.writeln('- @Each(array: list, variable: string, template: any) -> list — Render the template for every item, with the loop variable in scope');
     }
     if (functions.isNotEmpty) {
@@ -843,6 +843,133 @@ class _Statement {
   final Expr expr;
 }
 
+/// Query-read graph for one parse: for each Query statement, the
+/// queries its tool name or args read, directly or through plain
+/// statement aliases. Cycles are the groups that can never run first
+/// (mirrors upstream findQueryCycles; members in statement order).
+({Map<String, Set<String>> waitFor, Set<String> cyclic, List<List<String>> cycles})
+    analyzeQueryGraph(Map<String, _Statement> statements, List<String> order) {
+  bool isQuery(String name) {
+    final stmt = statements[name];
+    return stmt != null &&
+        stmt.expr is QueryExpr &&
+        !(stmt.expr as QueryExpr).isMutation;
+  }
+
+  // Collect query refs inside an expression, following plain
+  // statement aliases. A visited set stops alias loops; $states and
+  // unknown names are not query reads.
+  void collect(Expr e, Set<String> out, Set<String> visiting) {
+    if (e is RefExpr) {
+      final name = e.name;
+      if (isQuery(name)) {
+        out.add(name);
+      } else {
+        final stmt = statements[name];
+        if (stmt != null && stmt.expr is! QueryExpr && visiting.add(name)) {
+          collect(stmt.expr, out, visiting);
+          visiting.remove(name);
+        }
+      }
+      return;
+    }
+    if (e is FieldAccessExpr) {
+      collect(e.base, out, visiting);
+      return;
+    }
+    if (e is IndexExpr) {
+      collect(e.base, out, visiting);
+      collect(e.index, out, visiting);
+      return;
+    }
+    if (e is ListExpr) {
+      for (final item in e.items) {
+        collect(item, out, visiting);
+      }
+      return;
+    }
+    if (e is ObjectExpr) {
+      for (final entry in e.entries) {
+        collect(entry.value, out, visiting);
+      }
+      return;
+    }
+    if (e is TernaryExpr) {
+      collect(e.cond, out, visiting);
+      collect(e.thenExpr, out, visiting);
+      collect(e.elseExpr, out, visiting);
+      return;
+    }
+    if (e is BinaryExpr) {
+      collect(e.left, out, visiting);
+      collect(e.right, out, visiting);
+      return;
+    }
+    if (e is UnaryExpr) {
+      collect(e.expr, out, visiting);
+      return;
+    }
+    if (e is CallExpr) {
+      for (final arg in e.args) {
+        collect(arg, out, visiting);
+      }
+      return;
+    }
+    if (e is AtCallExpr) {
+      for (final arg in e.args) {
+        collect(arg, out, visiting);
+      }
+      return;
+    }
+    if (e is ActionListExpr) {
+      for (final item in e.items) {
+        collect(item, out, visiting);
+      }
+      return;
+    }
+    // Literal, Var ($state) and inline Query: no query reads.
+  }
+
+  final waitFor = <String, Set<String>>{};
+  for (final entry in statements.entries) {
+    final expr = entry.value.expr;
+    if (expr is! QueryExpr || expr.isMutation) continue;
+    final reads = <String>{};
+    if (expr.args.isNotEmpty) collect(expr.args[0], reads, {});
+    if (expr.args.length > 1) collect(expr.args[1], reads, {});
+    if (reads.isNotEmpty) waitFor[entry.key] = reads;
+  }
+
+  final position = <String, int>{};
+  for (var i = 0; i < order.length; i++) {
+    position[order[i]] = i;
+  }
+  final done = <String>{};
+  final path = <String>[];
+  final cycles = <List<String>>[];
+  void visit(String id) {
+    path.add(id);
+    for (final dep in waitFor[id] ?? const <String>{}) {
+      final at = path.indexOf(dep);
+      if (at >= 0) {
+        final cycle = path.sublist(at).toList()
+          ..sort((a, b) => (position[a] ?? 0).compareTo(position[b] ?? 0));
+        cycles.add(cycle);
+      } else if (waitFor.containsKey(dep) && !done.contains(dep)) {
+        visit(dep);
+      }
+    }
+    path.removeLast();
+    done.add(id);
+  }
+
+  for (final id in waitFor.keys) {
+    if (!done.contains(id)) visit(id);
+  }
+  final cyclic = cycles.expand((c) => c).toSet();
+  return (waitFor: waitFor, cyclic: cyclic, cycles: cycles);
+}
+
 class _Evaluator {
   _Evaluator(this.library, this.statements, this.state, this.errors, this.unresolved, {this.queryData = const {}, this.failedQueries = const {}});
   final OpenUILibrary library;
@@ -867,6 +994,30 @@ class _Evaluator {
   final Map<String, Object?> _memo = {};
   final Set<String> _visiting = {};
   Map<String, Object?> varDefaults = {};
+
+  /// Queries each Query statement reads (tool name or args, through
+  /// plain aliases), set fresh by the parser before evaluation. A
+  /// query waits until every read query has a result.
+  Map<String, Set<String>> queryWaitFor = const {};
+
+  /// Queries on a read cycle: they never run, and their readers wait.
+  Set<String> cyclicQueries = const {};
+
+  /// Declaration order of $variables, for parse-time defaults: a
+  /// default reads only states declared before it.
+  List<String> stateOrder = const [];
+
+  /// True while a $variable default is being computed: reads are
+  /// restricted to parse-time values (query results read as null,
+  /// only earlier states' defaults, built-in functions only).
+  var _restricted = false;
+
+  /// The $variable whose default is being computed.
+  var _restrictedVar = '';
+
+  /// Plain statements on the current restricted-resolution path, so
+  /// alias loops read as null instead of recursing forever.
+  final Set<String> _restrictedVisiting = {};
   // Loop-variable scope for @Each templates (e.g. `t` in @Each(rows, "t", ...)).
   final Map<String, Object?> _scope = {};
 
@@ -965,19 +1116,68 @@ class _Evaluator {
     _visiting.remove(name);
     // Stamp the statement name onto its node, so the renderer can
     // build per-statement keys (Modal dialog guard, EditableTable
-    // cell keys). Inline (non-statement) nodes keep ''.
-    if (v is ElementNode && v.statementId.isEmpty) {
+    // cell keys). A shared node reached through an alias is copied,
+    // like upstream's withStatementId, so two statements never share
+    // one node's key. Inline (non-statement) nodes keep ''.
+    if (v is ElementNode) {
       v = ElementNode(v.component, v.props, name);
     }
     _memo[name] = v;
     return v;
   }
 
+  /// True when any query this query reads has no result yet.
+  bool _queryWaits(String name) {
+    final reads = queryWaitFor[name];
+    if (reads == null) return false;
+    return reads.any((dep) => !queryData.containsKey(dep));
+  }
+
+  /// A query is pending when it has no result, has not failed, is not
+  /// cyclic, and either runs without waiting or waits on a pending
+  /// query. Mirrors upstream isPending, minus the in-flight flag the
+  /// evaluator cannot see (a fetching query has no data yet).
+  bool _queryPending(String name, Set<String> visiting) {
+    if (queryData.containsKey(name)) return false;
+    if (failedQueries.contains(name)) return false;
+    if (cyclicQueries.contains(name)) return false;
+    if (!visiting.add(name)) return false;
+    final reads = queryWaitFor[name];
+    if (reads == null || reads.isEmpty) return true;
+    return reads.any(
+        (dep) => !queryData.containsKey(dep) && _queryPending(dep, visiting));
+  }
+
+  /// True when a waiting query's dependencies have all settled
+  /// without a result (failed or cyclic): it shows its defaults, not
+  /// a skeleton. False while any dependency is still pending.
+  bool _queryWaitSettled(String name) {
+    final reads = queryWaitFor[name];
+    if (reads == null) return true;
+    return reads.every((dep) => !_queryPending(dep, {}));
+  }
+
   Object? _evalQuery(String name, QueryExpr e) {
     if (e.args.isEmpty) return null;
+    // Tool, args and initial are always evaluated, so their errors
+    // and dependency edges are recorded even when the query itself
+    // does not run (cyclic or waiting).
     final toolValue = evalExpr(e.args[0], false);
-    if (toolValue is! String) return null;
     final paramsValue = e.args.length > 1 ? evalExpr(e.args[1], false) : null;
+    // Mutations take no initial value; extra args stay unevaluated
+    // as before.
+    final hasInitial = !e.isMutation && e.args.length > 2;
+    final initial = hasInitial ? evalExpr(e.args[2], false) : null;
+    if (!e.isMutation &&
+        (cyclicQueries.contains(name) || _queryWaits(name))) {
+      // A query on a read cycle never runs; a query that reads one
+      // waits too. Waiting on a pending query shows the loading
+      // skeleton; waiting on a settled one shows the defaults. No
+      // request is created, so nothing fetches with placeholder
+      // parameters.
+      return _queryWaitSettled(name) ? initial : queryLoading;
+    }
+    if (toolValue is! String) return null;
     final params = <String, Object?>{};
     if (paramsValue is Map) {
       for (final entry in paramsValue.entries) {
@@ -992,8 +1192,6 @@ class _Evaluator {
       }
       return null;
     }
-    final hasInitial = e.args.length > 2;
-    final initial = hasInitial ? evalExpr(e.args[2], false) : null;
     if (_seenRequests.add('q:$name')) {
       queries.add(QueryRequest(statementName: name, tool: toolValue, params: params, initial: initial, hasInitial: hasInitial));
     }
@@ -1003,15 +1201,109 @@ class _Evaluator {
     return queryLoading;
   }
 
+  /// True when a default evaluates to a component, directly or
+  /// through plain aliases: those keep live evaluation, like
+  /// upstream's unevaluated element values.
+  bool _isElementDefault(Expr e, Set<String> visiting) {
+    if (e is CallExpr) return true;
+    if (e is RefExpr) {
+      final stmt = statements[e.name];
+      if (stmt != null && visiting.add(e.name)) {
+        return _isElementDefault(stmt.expr, visiting);
+      }
+    }
+    return false;
+  }
+
+  /// True when the expression calls a library function, an action or
+  /// an unknown function anywhere outside a component's props: such
+  /// a default is null as a whole (upstream's onlyBuiltinFunctions).
+  /// Unknown names still report, matching materialize-time errors.
+  bool _defaultHasNonBuiltinCall(Expr e) {
+    if (e is AtCallExpr) {
+      if (!builtinFunctionNames.contains(e.name)) {
+        if (!builtinActionNames.contains(e.name) &&
+            !library.functionsByName.containsKey(e.name) &&
+            !library.actionsByName.containsKey(e.name)) {
+          _err(OpenUIError('unknown-function', 'unknown function ${e.name}'));
+        }
+        return true;
+      }
+      return e.args.any(_defaultHasNonBuiltinCall);
+    }
+    if (e is ListExpr) return e.items.any(_defaultHasNonBuiltinCall);
+    if (e is ObjectExpr) {
+      return e.entries.any((en) => _defaultHasNonBuiltinCall(en.value));
+    }
+    if (e is TernaryExpr) {
+      return _defaultHasNonBuiltinCall(e.cond) ||
+          _defaultHasNonBuiltinCall(e.thenExpr) ||
+          _defaultHasNonBuiltinCall(e.elseExpr);
+    }
+    if (e is BinaryExpr) {
+      return _defaultHasNonBuiltinCall(e.left) ||
+          _defaultHasNonBuiltinCall(e.right);
+    }
+    if (e is UnaryExpr) return _defaultHasNonBuiltinCall(e.expr);
+    if (e is FieldAccessExpr) return _defaultHasNonBuiltinCall(e.base);
+    if (e is IndexExpr) {
+      return _defaultHasNonBuiltinCall(e.base) ||
+          _defaultHasNonBuiltinCall(e.index);
+    }
+    if (e is ActionListExpr) return e.items.any(_defaultHasNonBuiltinCall);
+    // Literal, Ref, Var, component call and inline Query: no call.
+    return false;
+  }
+
+  /// A reference inside a $variable default: a query result reads as
+  /// null, a plain statement is inlined with the same restrictions
+  /// (alias loops read as null), an unknown name is unresolved.
+  Object? _restrictedRef(String name) {
+    final stmt = statements[name];
+    if (stmt == null) {
+      unresolved.add(name);
+      return null;
+    }
+    if (stmt.expr is QueryExpr) return null;
+    _recordEdge(name);
+    if (!_restrictedVisiting.add(name)) return null;
+    final v = evalExpr(stmt.expr, false);
+    _restrictedVisiting.remove(name);
+    return v;
+  }
+
+  /// A $state read inside a default: only states declared before the
+  /// one being computed, at their frozen defaults. Anything else
+  /// (later states, undeclared names) reads as null.
+  Object? _restrictedState(String name) {
+    final self = stateOrder.indexOf(_restrictedVar);
+    final idx = stateOrder.indexOf(name);
+    if (self >= 0 && idx >= 0 && idx < self) {
+      _recordEdge('\$$name');
+      return varDefaults[name];
+    }
+    if (self < 0 && varDefaults.containsKey(name)) {
+      // No declaration order known: fall back to the frozen value.
+      _recordEdge('\$$name');
+      return varDefaults[name];
+    }
+    return null;
+  }
+
   Object? evalVar(String name) {
-    if (state.containsKey(name)) return state[name];
-    if (varDefaults.containsKey(name)) return varDefaults[name];
-    _recordEdge('\$$name');
+    if (varDefaults.containsKey(name)) {
+      // Host state wins over the frozen default.
+      return state.containsKey(name) ? state[name] : varDefaults[name];
+    }
     final stmt = statements['\$$name'];
     if (stmt == null) {
+      // Undeclared: a host value still counts, otherwise unresolved.
+      if (state.containsKey(name)) return state[name];
+      _recordEdge('\$$name');
       unresolved.add('\$$name');
       return null;
     }
+    _recordEdge('\$$name');
     // A top-level variable evaluation gets its own frame, so nested
     // resolutions are attributed to the variable. A nested call keeps
     // the outer frame: attributing inner edges to the outer parent
@@ -1022,19 +1314,48 @@ class _Evaluator {
     freshStatements.add('\$$name');
     freshEvaluations++;
     if (topLevel) _evalStack.add('\$$name');
-    final v = evalExpr(stmt.expr, false);
+    Object? v;
+    if (_isElementDefault(stmt.expr, {})) {
+      // A component default keeps the previous behavior: it is
+      // evaluated with live values, like any other component.
+      v = evalExpr(stmt.expr, false);
+    } else if (_defaultHasNonBuiltinCall(stmt.expr)) {
+      // A default calling a library function or an action is null.
+      v = null;
+    } else {
+      // An expression default is evaluated once, at parse time, with
+      // the built-in functions only. It does not update afterwards:
+      // a value that should follow other values is a plain statement.
+      _restricted = true;
+      _restrictedVar = name;
+      _restrictedVisiting.clear();
+      try {
+        v = evalExpr(stmt.expr, false);
+      } finally {
+        _restricted = false;
+        _restrictedVar = '';
+        _restrictedVisiting.clear();
+      }
+    }
     if (topLevel) _evalStack.removeLast();
     varDefaults[name] = v;
-    return v;
+    // The default is computed (and cached) even when host state
+    // provides a value, so later defaults read this default, not
+    // the host value; host state still wins for this variable.
+    return state.containsKey(name) ? state[name] : v;
   }
 
   Object? evalExpr(Expr e, bool expectAction) {
     if (e is LiteralExpr) return e.value;
     if (e is RefExpr) {
       if (_scope.containsKey(e.name)) return _scope[e.name];
+      if (_restricted) return _restrictedRef(e.name);
       return evalStatement(e.name);
     }
-    if (e is VarExpr) return evalVar(e.name);
+    if (e is VarExpr) {
+      if (_restricted) return _restrictedState(e.name);
+      return evalVar(e.name);
+    }
     if (e is FieldAccessExpr) {
       final base = evalExpr(e.base, false);
       if (isQueryLoading(base)) return _preserveLoading(base);
@@ -1108,6 +1429,17 @@ class _Evaluator {
   String _str(Object? v) => v == null ? '' : '$v';
 
   Object? _evalAt(AtCallExpr e, bool expectAction) {
+    if (_restricted) {
+      if (builtinFunctionNames.contains(e.name)) return _evalBuiltin(e);
+      // Library functions and actions only exist in the client, so
+      // a default calling one is null. Unknown names still report.
+      if (!builtinActionNames.contains(e.name) &&
+          !library.functionsByName.containsKey(e.name) &&
+          !library.actionsByName.containsKey(e.name)) {
+        _err(OpenUIError('unknown-function', 'unknown function ${e.name}'));
+      }
+      return null;
+    }
     if (builtinActionNames.contains(e.name)) {
       if (e.name == 'Set') {
         if (e.args.isEmpty || e.args.first is! VarExpr) return null;
@@ -1305,6 +1637,22 @@ class _Evaluator {
       return null;
     }
 
+    /// Upstream toNumber: numbers pass through, numeric strings parse,
+    /// booleans are 1/0, anything else (including null) is 0.
+    double toNumOrZero(Object? v) {
+      if (v is num) return v.toDouble();
+      if (v is String) return double.tryParse(v) ?? 0;
+      if (v is bool) return v ? 1 : 0;
+      return 0;
+    }
+
+    /// Applies [fn] to a number, or to each element of a list
+    /// (nested lists keep their shape), like upstream's elementwise.
+    Object? elementwise(Object? v, double Function(double) fn) {
+      if (v is List) return [for (final e in v) elementwise(e, fn)];
+      return fn(toNumOrZero(v));
+    }
+
     List<double> numsOf(List list) {
       final out = <double>[];
       for (final v in list) {
@@ -1375,18 +1723,28 @@ class _Evaluator {
         list.sort((a, b) => desc ? -cmp(a, b) : cmp(a, b));
         return list;
       case 'Round':
-        final n = toNum(first);
-        if (n == null) return null;
         final decimals = args.length > 1 ? (toNum(args[1])?.round() ?? 0) : 0;
         final factor = _pow10(decimals);
+        if (first is List) {
+          return elementwise(first, (n) => (n * factor).round() / factor);
+        }
+        final n = toNum(first);
+        if (n == null) return null;
         return (n * factor).round() / factor;
       case 'Abs':
+        if (first is List) return elementwise(first, (n) => n.abs());
         final n = toNum(first);
         return n == null ? null : n.abs();
       case 'Floor':
+        if (first is List) {
+          return elementwise(first, (n) => n.floorToDouble());
+        }
         final n = toNum(first);
         return n == null ? null : n.floorToDouble();
       case 'Ceil':
+        if (first is List) {
+          return elementwise(first, (n) => n.ceilToDouble());
+        }
         final n = toNum(first);
         return n == null ? null : n.ceilToDouble();
       default:
@@ -1688,27 +2046,23 @@ class _Evaluator {
 ParseResult parseOpenUI(String text, OpenUILibrary library, {Map<String, Object?> state = const {}, Map<String, Object?> queryData = const {}, bool streaming = false, Set<String> failedQueries = const {}}) {
   final errors = <OpenUIError>[];
   final unresolved = <String>{};
-  // Stored-message markers: skip marker lines; JSON context after
-  // ]]>openui:context is host data, not OpenUI Lang.
-  var inContext = false;
-  final lines = <String>[];
-  for (final raw in text.split('\n')) {
-    final line = raw.trim();
-    if (line.startsWith(']]>openui:')) {
-      inContext = line.startsWith(']]>openui:context');
-      continue;
-    }
-    if (inContext) {
-      if (line.startsWith('}')) inContext = false;
-      continue;
-    }
-    if (line.isEmpty) continue;
-    lines.add(line);
+  // Preparation order, mirroring the specification: stored-message
+  // markers first, then fence extraction, then comment stripping. A
+  // fence line inside a comment still counts, because comments are
+  // stripped after extraction.
+  final extracted = stripOpenUIFences(_filterMessageMarkers(text).join('\n'));
+  var lines = extracted.split('\n');
+  if (streaming && lines.isNotEmpty && _isPartialMarker(lines.last)) {
+    // A trailing partial marker may still grow into one; hold it
+    // instead of reporting it as a bad statement.
+    lines = lines.sublist(0, lines.length - 1);
   }
   final statements = <String, _Statement>{};
   var order = <String>[];
   final stmtRe = RegExp(r'^([A-Za-z_][A-Za-z0-9_]*|\$[A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)\s*(.+)$');
-  for (final line in lines) {
+  for (final raw in lines) {
+    final line = _stripComment(raw.trim()).trim();
+    if (line.isEmpty) continue;
     final m = stmtRe.firstMatch(line);
     if (m == null) {
       errors.add(OpenUIError('parse-failed', 'not a statement: $line'));
@@ -1724,7 +2078,15 @@ ParseResult parseOpenUI(String text, OpenUILibrary library, {Map<String, Object?
       errors.add(OpenUIError('parse-failed', 'cannot parse statement $name'));
     }
   }
+  final graph = analyzeQueryGraph(statements, order);
+  for (final cycle in graph.cycles) {
+    errors.add(OpenUIError('query-cycle',
+        'Queries ${cycle.join(', ')} read each other\'s results, so none of them can run first. They do not run'));
+  }
   final evaluator = _Evaluator(library, statements, Map.of(state), errors, unresolved, queryData: queryData, failedQueries: failedQueries);
+  evaluator.queryWaitFor = graph.waitFor;
+  evaluator.cyclicQueries = graph.cyclic;
+  evaluator.stateOrder = order.where((n) => n.startsWith(r'$')).toList();
   // Evaluate $variable defaults eagerly so Reset can restore them.
   for (final name in order) {
     if (name.startsWith(r'$')) evaluator.evalVar(name.substring(1));
@@ -1760,6 +2122,172 @@ ParseResult parseOpenUI(String text, OpenUILibrary library, {Map<String, Object?
   // they are expected (forward references not yet arrived).
   final unresolvedList = streaming ? <String>[] : unresolved.toList();
   return ParseResult(root: root, errors: errors, unresolved: unresolvedList, queries: evaluator.queries, mutations: evaluator.mutations);
+}
+
+/// Text that starts an OpenUI Lang statement (`name =` or `$name =`).
+final _statementStart = RegExp(r'^\s*\$?[A-Za-z_]\w*\s*=(?!=)');
+
+/// A line that starts with ```, then an optional tag and the rest of
+/// the line.
+final _fenceLine = RegExp(r'^[ \t]*```[ \t]*([\w.+-]*)[ \t]*(.*?)[ \t]*$');
+
+/// Code on a fence opener's line (```openui root = ... or
+/// ```root = ...), or null.
+String? _openerCode(String tag, String rest) {
+  if (_statementStart.hasMatch(rest)) return rest;
+  if (tag.isNotEmpty && RegExp(r'^=(?!=)').hasMatch(rest)) {
+    return '$tag $rest';
+  }
+  return null;
+}
+
+/// String and bracket state after a line of code: an open "..."
+/// string, and the bracket depth.
+class _ScanState {
+  var open = false;
+  var depth = 0;
+}
+
+void _scanCode(String line, _ScanState state) {
+  for (var i = 0; i < line.length; i++) {
+    final c = line[i];
+    if (state.open) {
+      if (c == '\\') {
+        i++;
+      } else if (c == '"') {
+        state.open = false;
+      }
+    } else if (c == '"') {
+      state.open = true;
+    } else if (c == '(' || c == '[' || c == '{') {
+      state.depth++;
+    } else if ((c == ')' || c == ']' || c == '}') && state.depth > 0) {
+      state.depth--;
+    }
+  }
+}
+
+/// Whether a block's first code line (after blank and comment lines)
+/// starts a statement.
+bool _startsProgram(String block) {
+  final stripped =
+      block.replaceFirst(RegExp(r'^(\s*(\/\/|#)[^\n]*\n)+'), '');
+  return _statementStart.hasMatch(stripped);
+}
+
+/// Extract the program from markdown code fences, or return the input
+/// when no fence holds one. Line-based, mirroring upstream
+/// stripFences: inline ``` pairs are prose, ```openui-js blocks are
+/// skipped, code may follow the tag on the opener line, and a stray
+/// closing fence or ```js helper blocks fall back to the unfenced
+/// program.
+String stripOpenUIFences(String input) {
+  if (!input.contains('```')) return input;
+  final blocks = <String>[];
+  final outside = <String>[];
+  List<String>? body;
+  var script = false;
+  final scan = _ScanState();
+  for (final rawLine in input.split('\n')) {
+    final line = rawLine.endsWith('\r')
+        ? rawLine.substring(0, rawLine.length - 1)
+        : rawLine;
+    final fence = scan.open ? null : _fenceLine.firstMatch(line);
+    if (fence == null) {
+      if (script) continue;
+      (body ?? outside).add(line);
+      // Code lines are scanned for strings: every line inside a
+      // fence, and outside one a statement and its continuation
+      // lines, so a quote in prose like `5"` is harmless.
+      if (scan.open ||
+          scan.depth > 0 ||
+          body != null ||
+          _statementStart.hasMatch(line)) {
+        _scanCode(line, scan);
+      }
+      continue;
+    }
+    scan.depth = 0; // a fence line ends any statement
+    final tag = fence.group(1) ?? '';
+    final rest = fence.group(2) ?? '';
+    if (body != null) {
+      // Any fence line closes an open fence; what follows it on that
+      // line is ignored.
+      if (!script) blocks.add(body.join('\n'));
+      body = null;
+      script = false;
+      continue;
+    }
+    if (rest.contains('```')) continue; // a ``` pair on one line is inline code in prose
+    final code = _openerCode(tag, rest);
+    script = tag.toLowerCase() == 'openui-js';
+    body = code == null ? <String>[] : [code];
+  }
+  if (body != null && !script) blocks.add(body.join('\n')); // unterminated (streaming)
+  if (blocks.any(_startsProgram)) return blocks.join('\n');
+  // No fence starts a program: use an unfenced program (a stray
+  // closing ```, or ```js helpers).
+  final unfenced = outside.any(_statementStart.hasMatch);
+  return unfenced || blocks.every((b) => b.trim().isEmpty)
+      ? outside.join('\n')
+      : blocks.join('\n');
+}
+
+/// Stored-message markers: skip marker lines; JSON context after
+/// ]]>openui:context is host data, not OpenUI Lang. Lines are kept
+/// untrimmed for fence matching; callers trim before parsing.
+List<String> _filterMessageMarkers(String text) {
+  var inContext = false;
+  final lines = <String>[];
+  for (final raw in text.split('\n')) {
+    final line = raw.trim();
+    if (line.startsWith(']]>openui:')) {
+      inContext = line.startsWith(']]>openui:context');
+      continue;
+    }
+    if (inContext) {
+      if (line.startsWith('}')) inContext = false;
+      continue;
+    }
+    lines.add(raw);
+  }
+  return lines;
+}
+
+/// Strip a // or # line comment outside of strings (both " and '
+/// delimiters, backslash escapes honored). Returns the line unchanged
+/// when it holds no comment marker outside a string.
+String _stripComment(String line) {
+  String? quote;
+  for (var i = 0; i < line.length; i++) {
+    final c = line[i];
+    if (quote != null) {
+      if (c == '\\') {
+        i++;
+      } else if (c == quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (c == '"' || c == "'") {
+      quote = c;
+      continue;
+    }
+    if (c == '#' ||
+        (c == '/' && i + 1 < line.length && line[i + 1] == '/')) {
+      return line.substring(0, i);
+    }
+  }
+  return line;
+}
+
+/// A line that may still grow into a ]]>openui: marker: non-empty
+/// and a proper prefix of the marker.
+bool _isPartialMarker(String line) {
+  final trimmed = line.trim();
+  return trimmed.isNotEmpty &&
+      trimmed != ']]>openui:' &&
+      ']]>openui:'.startsWith(trimmed);
 }
 
 /// Autocloser: make partial (mid-stream) text syntactically valid by
@@ -1982,7 +2510,14 @@ class IncrementalOpenUIParser {
 
   ParseResult parse(String text, {Map<String, Object?> state = const {}, Map<String, Object?> queryData = const {}, bool streaming = false, Set<String> failedQueries = const {}}) {
     _parseCalls++;
-    final rawLines = text.split('\n');
+    // Same preparation as the one-shot path; the line machinery
+    // below then sees only program lines (its own marker branches
+    // become no-ops).
+    final extracted = stripOpenUIFences(_filterMessageMarkers(text).join('\n'));
+    var rawLines = extracted.split('\n');
+    if (streaming && rawLines.isNotEmpty && _isPartialMarker(rawLines.last)) {
+      rawLines = rawLines.sublist(0, rawLines.length - 1);
+    }
     var prefix = 0;
     while (prefix < rawLines.length && prefix < _rawLines.length && rawLines[prefix] == _rawLines[prefix]) {
       prefix++;
@@ -2021,6 +2556,13 @@ class IncrementalOpenUIParser {
     for (final name in dirty) {
       _evaluator.invalidate(name);
     }
+
+    // Query-read graph for this parse: waiting, cycles and the
+    // $variable declaration order behind parse-time defaults.
+    final graph = analyzeQueryGraph(_statements, _order);
+    _evaluator.queryWaitFor = graph.waitFor;
+    _evaluator.cyclicQueries = graph.cyclic;
+    _evaluator.stateOrder = List.of(_varNames);
 
     // Top levels, in full-parse order: $variables first, then root.
     // (A fallback candidate can itself be a $variable; full parsing
@@ -2070,6 +2612,10 @@ class IncrementalOpenUIParser {
     }
 
     final errors = <OpenUIError>[..._parseErrors];
+    for (final cycle in graph.cycles) {
+      errors.add(OpenUIError('query-cycle',
+          'Queries ${cycle.join(', ')} read each other\'s results, so none of them can run first. They do not run'));
+    }
     for (final name in _order) {
       errors.addAll(_evaluator.errorsByStatement[name] ?? const []);
     }
@@ -2163,7 +2709,9 @@ class IncrementalOpenUIParser {
   }
 
   _LineParse _parseLine(String line) {
-    final m = _stmtRe.firstMatch(line);
+    final stripped = _stripComment(line).trim();
+    if (stripped.isEmpty) return const _LineParse();
+    final m = _stmtRe.firstMatch(stripped);
     if (m == null) return _LineParse(error: 'not a statement: $line');
     final name = m.group(1)!;
     final exprText = m.group(2)!;

@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.18.2
+
+- Aligned with OpenUI Lang 1.1 (`@openuidev/lang-core` 1.1.0,
+  PR #1480; component set still matches `@openuidev/react-ui`
+  0.18.1, so the major.minor stays 0.18):
+  - Query and Mutation arguments can read other statements
+    (forward references, aliases); a `$state` read that way
+    refetches on change.
+  - A query whose tool name or args read another query's result
+    waits until that query has a result, then runs, and runs again
+    whenever the result changes. Queries that read each other
+    report the new `query-cycle` error and do not run; a query
+    that reads a cyclic or failed query keeps its defaults, and a
+    query waiting on a pending query renders as loading. A failed
+    fetch is still retried only by `@Run`, a refresh interval or
+    an explicit refetch, not on every evaluation.
+  - `@Round`, `@Abs`, `@Floor` and `@Ceil` apply to each element
+    of a list (nested lists keep their shape).
+  - An expression state default (`$total = 1 + 2`) is evaluated
+    once at parse time with the built-in functions only. It reads
+    the defaults of states declared before it and plain statements
+    it references; a state declared after it, a query result and a
+    library function or action call read as null. Note: a default
+    no longer follows host state or later values; a value that
+    should follow other values must be a plain statement.
+    A default that is a component (directly or through an alias)
+    stays live and is not frozen.
+  - Fence extraction is now line-based per the 1.1 rules: inline
+    backtick pairs in prose, code on the opener line, skipped
+    `openui-js` blocks, a stray closing fence or `js` helper
+    blocks falling back to the unfenced program, and an
+    unterminated fence running to the end of the text.
+  - `//` and `#` line comments (outside strings), and a trailing
+    partial `]]>openui:` marker line is held while streaming
+    instead of reported as a bad statement.
+  - A shared element reached through an alias is copied with its
+    own statement id, so per-statement keys never collide.
+- Deliberate difference, kept from before: lines that are not
+  statements still report `parse-failed`; upstream silently skips
+  them. Multi-line statements (e.g. a ternary split across lines)
+  are still unsupported: this parser is line-based.
+  A component nested inside a list or object default is frozen at
+  parse time instead of staying live as upstream does. Mutation
+  arguments are snapshotted at parse time, so a pending query's
+  result appears in them as the loading placeholder, whereas
+  upstream evaluates them when the mutation is triggered.
+
 ## 0.18.1
 
 - READMEs now state the package as published on pub.dev with a
