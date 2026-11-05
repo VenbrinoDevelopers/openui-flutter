@@ -53,6 +53,101 @@
   arguments are snapshotted at parse time, so a pending query's
   result appears in them as the loading placeholder, whereas
   upstream evaluates them when the mutation is triggered.
+- Independent review fixes (16 major, 29 minor findings),
+  applied across the renderer, the language core and the charts:
+  - Renderer and components:
+    - Input, TextArea and editable-table cells now follow
+      external value changes without losing focus (synced
+      controller; no ValueKey rebuild).
+    - FormControl errors appear only after real interaction
+      (edit or blur); initialState, Set actions and query
+      defaults no longer count as touched, and a required field
+      left empty after blur now errors. Reset clears touched
+      state in both renderer and controller modes.
+    - A numbered ListBlock with a custom ListItem builder uses
+      the custom rendering.
+    - Table column widths accept numeric strings (trimmed) and
+      fall back to 120 for anything else, including NaN and
+      Infinity; a Table Col with scalar data renders as a
+      single-cell column (the library type is now `any`).
+    - DatePickerField and DateRangeField support 1900–2100 and
+      open positioned on the current value; a Slider with
+      min > max no longer throws (values are ordered, then
+      clamped, labels keep the original values).
+    - Modal content follows state changes while open; an @Run
+      refetch shows loading immediately; formState is read
+      without a full copy per access; the color scheme compares
+      by value, so rebuilding an equal theme no longer clears
+      the render cache. Empty-registry shadowing, initialState
+      after mount and in-place state mutation are documented
+      where they are declared.
+    - Chart axis labels use the theme's axis text color, so they
+      stay readable in dark host apps.
+  - Charts:
+    - Tooltips use explicit dark text on the white card, so they
+      stay readable in dark host apps.
+    - Pixel goldens added for pie, donut, radial, scatter,
+      stacked bar, area, step line and grouped bars with a hidden
+      series.
+    - The donut hole no longer responds to hover or taps; hidden
+      legend rows show their share of the original total; radial
+      hit-testing no longer counts ghost rings; empty categories
+      no longer draw a degenerate line; single-category layout
+      in narrow containers no longer leaves a hover dead zone;
+      bar label area never goes negative; scatter tooltips show
+      the z value; taps only respond to the primary button;
+      grouped bars regroup around visible series; hiding the
+      last visible series is refused.
+    - README Charts sections corrected in both languages (nine
+      chart types including Radar; scatter axes use the data
+      domain, not a zero-anchored nice domain; SingleStackedBar
+      has no legend hide switch).
+  - Language core (besides the behavior changes below):
+    - A plain statement cycle now reports a `cycle` error
+      instead of failing silently.
+    - Member access supports array pluck and `.length` on
+      arrays and strings.
+    - Non-node items in a node list report `type-mismatch`
+      (null and boolean children are ignored, as in React).
+    - A query whose params still carry a loading or failed
+      placeholder no longer sends a request; it waits and runs
+      once the dependency resolves. Mutation timing is
+      unchanged (still snapshotted at parse time).
+    - The incremental parser's fallback root is rescanned on
+      every parse instead of going stale, and context blocks
+      track brace depth (braces inside strings ignored), so
+      nested JSON no longer ends a context early.
+    - Double-quoted string escapes decode via JSON (single
+      quotes keep the old loose behavior); `@Each` keeps null
+      results instead of dropping them; a non-string query tool
+      name reports `type-mismatch`; list and map indexes convert
+      through `toNumber`; the fallback search continues past a
+      failed candidate; numeric literals accept scientific
+      notation.
+- Behavior changes in expression evaluation (separate from the
+  Lang 1.1 alignment above; these change the results of existing
+  programs to match JavaScript):
+  - `&&` and `||` now use JS truthiness, short-circuit, and
+    return the operand itself, not a boolean; `!` and ternaries
+    use JS truthiness. Falsy values are null, false, 0, NaN
+    and "".
+  - Arithmetic and comparisons go through JS `Number()`
+    coercion: non-string `+` adds numerically (null → 0,
+    true → 1, so `"5" - 2` is 3); division and modulo by zero
+    return 0; `==`/`!=` are loose (`5 == "5"` is true,
+    `"abc" == 0` is false — unparseable strings are NaN, not
+    0); comparisons compare numerically, not lexicographically
+    (`"10" > "9"` is true). Two objects compare by identity
+    only; an object against a primitive converts first (lists
+    join with commas, maps become `[object Object]`). Integer
+    arithmetic keeps int results (`1 + 2` renders "3").
+  - One existing test expectation changed accordingly: a
+    forward-read state default now evaluates null + 1 = 1.
+- Known limitations left from this batch (not fixed here):
+  - Statement↔variable mixed cycles still fail silently (root
+    null, no error); fixing them needs a design change in `$var`
+    default freezing and is tracked separately.
+  - int/int division renders "3.0" (Dart) rather than JS "3".
 
 ## 0.18.1
 
