@@ -178,7 +178,10 @@ List<ComponentDef> _baseComponents() => [
       ]),
       const ComponentDef('Col', 'One table column: label, cell data, optional type (string/number/action; a display hint React\'s Table renderer also ignores).', [
         PropDef('label', _s, required: true),
-        PropDef('data', _l, required: true),
+        // any, not list: a scalar data renders as a single-cell
+        // column (the renderer wraps it via _asArray). Typing it as
+        // list dropped the whole column at parse time on scalars.
+        PropDef('data', _any, required: true),
         PropDef('type', _s),
       ]),
       const ComponentDef('EditableTable', 'Editable table. Column objects: {type: text/number/date-single/select/url, key?, header?, width?, options? [{value, label}]}. Row objects: {id, values}. Cell edits write to form state under "<name>:<rowId>:<columnKey>" (statement id when name is empty); "Save Changes" writes the full edited rows under `name` (skipped when name is empty).', [

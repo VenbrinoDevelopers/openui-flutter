@@ -84,7 +84,10 @@ void main() {
     test('a state declared after reads as null', () {
       final r = parseOpenUI(
           '\$a = \$b + 1\n\$b = 5\nroot = TextContent("" + \$a)', library);
-      expect(textOf(r), '');
+      // The forward read still yields null (not the later 5, which
+      // would give 6); M2 upstream arithmetic then coerces null to
+      // 0, so null + 1 is 1. The old null-propagating + gave ''.
+      expect(textOf(r), '1');
     });
 
     test('plain statements referenced by a default are inlined', () {

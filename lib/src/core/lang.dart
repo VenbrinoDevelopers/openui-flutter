@@ -16,6 +16,8 @@
 // map) carries widget builders. See the Task 3 report for the
 // trade-off discussion.
 
+import 'dart:convert';
+
 import 'registry.dart';
 
 enum PropType { string, number, boolean, list, node, nodeList, any, action, actionList }
@@ -330,6 +332,43 @@ class _Token {
   final Object? value;
 }
 
+/// Double-quoted strings decode like upstream: JSON.parse, falling
+/// back to the raw text when it fails (e.g. a malformed escape
+/// mid-stream), so decoding never crashes the parse.
+String _decodeDoubleQuoted(String raw) {
+  try {
+    final decoded = jsonDecode('"$raw"');
+    return decoded is String ? decoded : raw;
+  } catch (_) {
+    return raw;
+  }
+}
+
+/// Single-quoted strings keep the historical lenient escapes:
+/// \n \t \r, anything else passes its char through. Upstream does
+/// not decode \u in single quotes either.
+String _decodeSingleQuoted(String raw) {
+  final buf = StringBuffer();
+  var i = 0;
+  while (i < raw.length) {
+    final ch = raw[i];
+    if (ch == '\\' && i + 1 < raw.length) {
+      final n = raw[i + 1];
+      buf.write(switch (n) {
+        'n' => '\n',
+        't' => '\t',
+        'r' => '\r',
+        _ => n,
+      });
+      i += 2;
+      continue;
+    }
+    buf.write(ch);
+    i++;
+  }
+  return buf.toString();
+}
+
 List<_Token> _tokenize(String src) {
   final out = <_Token>[];
   var i = 0;
@@ -341,19 +380,14 @@ List<_Token> _tokenize(String src) {
     }
     if (c == '"' || c == "'") {
       final quote = c;
-      final buf = StringBuffer();
+      final raw = StringBuffer();
       i++;
       var closed = false;
       while (i < src.length) {
         final ch = src[i];
         if (ch == '\\' && i + 1 < src.length) {
-          final n = src[i + 1];
-          buf.write(switch (n) {
-            'n' => '\n',
-            't' => '\t',
-            'r' => '\r',
-            _ => n,
-          });
+          raw.write(ch);
+          raw.write(src[i + 1]);
           i += 2;
           continue;
         }
@@ -362,11 +396,12 @@ List<_Token> _tokenize(String src) {
           i++;
           break;
         }
-        buf.write(ch);
+        raw.write(ch);
         i++;
       }
       if (!closed) throw const FormatException('unterminated string');
-      out.add(_Token('string', buf.toString(), buf.toString()));
+      final value = quote == '"' ? _decodeDoubleQuoted(raw.toString()) : _decodeSingleQuoted(raw.toString());
+      out.add(_Token('string', value, value));
       continue;
     }
     if (c == r'$' && i + 1 < src.length && RegExp(r'[A-Za-z_]').hasMatch(src[i + 1])) {
@@ -397,17 +432,17 @@ List<_Token> _tokenize(String src) {
         if (src[j] == '.') dot = true;
         j++;
       }
-      final text = src.substring(i, j);
-      out.add(_Token('number', text, num.tryParse(text) ?? 0));
-      i = j;
-      continue;
-    }
-    if (RegExp(r'[0-9]').hasMatch(c)) {
-      var j = i;
-      var dot = false;
-      while (j < src.length && (RegExp(r'[0-9]').hasMatch(src[j]) || (src[j] == '.' && !dot))) {
-        if (src[j] == '.') dot = true;
-        j++;
+      // Optional exponent, only when digits follow (so `1else`
+      // still scans as `1` + ident, not a broken number).
+      if (j < src.length && (src[j] == 'e' || src[j] == 'E')) {
+        var k = j + 1;
+        if (k < src.length && (src[k] == '+' || src[k] == '-')) k++;
+        if (k < src.length && RegExp(r'[0-9]').hasMatch(src[k])) {
+          while (k < src.length && RegExp(r'[0-9]').hasMatch(src[k])) {
+            k++;
+          }
+          j = k;
+        }
       }
       final text = src.substring(i, j);
       out.add(_Token('number', text, num.tryParse(text) ?? 0));
@@ -1104,7 +1139,14 @@ class _Evaluator {
       unresolved.add(name);
       return null;
     }
-    if (_visiting.contains(name)) return null; // cycle: render as nothing
+    if (_visiting.contains(name)) {
+      // Cycle: report it instead of failing silently, mirroring the
+      // variable-cycle error. The re-entry is not memoized, so each
+      // top-level evaluation that reaches the cycle reports once.
+      _err(OpenUIError('cycle',
+          'Statement $name reads itself, directly or through other statements, so it has no value.'));
+      return null;
+    }
     _clearEdges(name);
     errorsByStatement[name] = [];
     freshStatements.add(name);
@@ -1177,7 +1219,17 @@ class _Evaluator {
       // parameters.
       return _queryWaitSettled(name) ? initial : queryLoading;
     }
-    if (toolValue is! String) return null;
+    if (toolValue is! String) {
+      // A loading tool propagates instead of erroring: the query
+      // waits for its real tool. A null tool is unresolved, not a
+      // type error (forward references during streaming read null);
+      // only a present, non-string tool is reported.
+      if (isQueryLoading(toolValue)) return _preserveLoading(toolValue);
+      if (toolValue != null) {
+        _err(OpenUIError('type-mismatch', 'Query tool must be a string'));
+      }
+      return null;
+    }
     final params = <String, Object?>{};
     if (paramsValue is Map) {
       for (final entry in paramsValue.entries) {
@@ -1185,6 +1237,13 @@ class _Evaluator {
       }
     } else if (paramsValue != null) {
       params['value'] = paramsValue;
+    }
+    if (!e.isMutation && params.values.any(isQueryLoading)) {
+      // A request must never carry a loading or failed placeholder
+      // as a parameter: the query waits instead, and re-evaluates
+      // with real parameters once its dependencies resolve.
+      // Mutations keep their parse-time snapshot (a documented gap).
+      return _preserveLoading(params);
     }
     if (e.isMutation) {
       if (_seenRequests.add('m:$name')) {
@@ -1370,7 +1429,26 @@ class _Evaluator {
     if (e is FieldAccessExpr) {
       final base = evalExpr(e.base, false);
       if (isQueryLoading(base)) return _preserveLoading(base);
+      if (base is List) {
+        // Array pluck, like upstream Member: the field of every
+        // element (null for elements without it), and .length.
+        if (e.field == 'length') return base.length;
+        final out = <Object?>[];
+        for (final item in base) {
+          if (item is Map) {
+            out.add(item[e.field]);
+          } else if (item is List && e.field == 'length') {
+            out.add(item.length);
+          } else if (item is String && e.field == 'length') {
+            out.add(item.length);
+          } else {
+            out.add(null);
+          }
+        }
+        return out;
+      }
       if (base is Map) return base[e.field];
+      if (base is String && e.field == 'length') return base.length;
       return null;
     }
     if (e is IndexExpr) {
@@ -1378,10 +1456,22 @@ class _Evaluator {
       if (isQueryLoading(base)) return _preserveLoading(base);
       final index = evalExpr(e.index, false);
       if (isQueryLoading(index)) return _preserveLoading(index);
-      if (base is List && index is int) {
-        return index >= 0 && index < base.length ? base[index] : null;
+      if (base == null || index == null) return null;
+      if (base is List) {
+        // Upstream Index: obj[toNumber(idx)]; a non-integral index
+        // has no element, like JS obj[1.5].
+        final n = _toNumber(index);
+        if (n != n.truncateToDouble()) return null;
+        final i = n.toInt();
+        return i >= 0 && i < base.length ? base[i] : null;
       }
-      if (base is Map) return base[index];
+      if (base is Map) {
+        // Upstream Index on objects: obj[String(idx)]. The direct
+        // lookup is a fallback for host maps with non-string keys.
+        final key = '$index';
+        if (base.containsKey(key)) return base[key];
+        return base[index];
+      }
       return null;
     }
     if (e is ListExpr) {
@@ -1393,33 +1483,47 @@ class _Evaluator {
     if (e is TernaryExpr) {
       final cond = evalExpr(e.cond, false);
       if (isQueryLoading(cond)) return _preserveLoading(cond);
-      return evalExpr(cond == true ? e.thenExpr : e.elseExpr, expectAction);
+      return evalExpr(_truthy(cond) ? e.thenExpr : e.elseExpr, expectAction);
     }
     if (e is UnaryExpr) {
       final v = evalExpr(e.expr, false);
       if (isQueryLoading(v)) return _preserveLoading(v);
-      if (e.op == '!') return v != true;
-      if (e.op == '-' && v is num) return -v;
+      if (e.op == '!') return !_truthy(v);
+      if (e.op == '-') return -_toNumber(v);
       return null;
     }
     if (e is BinaryExpr) {
+      // Short-circuit operators evaluate lazily and return an
+      // operand, like upstream: the right side is never evaluated
+      // when the left side already decides the result, so it
+      // contributes no errors or unresolved names.
+      if (e.op == '&&' || e.op == '||') {
+        final l = evalExpr(e.left, false);
+        if (isQueryLoading(l)) return _preserveLoading(l);
+        if (e.op == '&&') {
+          if (!_truthy(l)) return l;
+        } else {
+          if (_truthy(l)) return l;
+        }
+        final r = evalExpr(e.right, false);
+        if (isQueryLoading(r)) return _preserveLoading(r);
+        return r;
+      }
       final l = evalExpr(e.left, false);
       final r = evalExpr(e.right, false);
       if (isQueryLoading(l) || isQueryLoading(r)) return _findFailed(l) ?? _findFailed(r) ?? queryLoading;
       return switch (e.op) {
-        '+' => (l is String || r is String) ? '${_str(l)}${_str(r)}' : (l is num && r is num ? l + r : null),
-        '-' => l is num && r is num ? l - r : null,
-        '*' => l is num && r is num ? l * r : null,
-        '/' => l is num && r is num && r != 0 ? l / r : null,
-        '%' => l is num && r is num && r != 0 ? l % r : null,
-        '==' => l == r,
-        '!=' => l != r,
-        '<' => l is num && r is num ? l < r : (l is String && r is String ? l.compareTo(r) < 0 : false),
-        '<=' => l is num && r is num ? l <= r : false,
-        '>' => l is num && r is num ? l > r : false,
-        '>=' => l is num && r is num ? l >= r : false,
-        '&&' => l == true && r == true,
-        '||' => l == true || r == true,
+        '+' => (l is String || r is String) ? '${_str(l)}${_str(r)}' : _toNumber(l) + _toNumber(r),
+        '-' => _toNumber(l) - _toNumber(r),
+        '*' => _toNumber(l) * _toNumber(r),
+        '/' => _toNumber(r) == 0 ? 0 : _toNumber(l) / _toNumber(r),
+        '%' => _toNumber(r) == 0 ? 0 : _toNumber(l) % _toNumber(r),
+        '==' => _looseEquals(l, r),
+        '!=' => !_looseEquals(l, r),
+        '<' => _toNumber(l) < _toNumber(r),
+        '<=' => _toNumber(l) <= _toNumber(r),
+        '>' => _toNumber(l) > _toNumber(r),
+        '>=' => _toNumber(l) >= _toNumber(r),
         _ => null,
       };
     }
@@ -1438,6 +1542,121 @@ class _Evaluator {
   }
 
   String _str(Object? v) => v == null ? '' : '$v';
+
+  /// JavaScript truthiness: null, false, 0/NaN and '' are falsy;
+  /// everything else (including lists, maps and sentinels) is truthy.
+  bool _truthy(Object? v) {
+    if (v == null) return false;
+    if (v is bool) return v;
+    if (v is num) return v != 0 && !v.isNaN;
+    if (v is String) return v.isNotEmpty;
+    return true;
+  }
+
+  /// Upstream `toNumber`: numbers pass through, numeric strings parse
+  /// (whitespace-trimmed; unparsable or NaN -> 0), booleans are 1/0,
+  /// anything else (including null) is 0. Hex strings parse to 0,
+  /// unlike JS Number(); that edge is intentionally not chased.
+  /// Upstream toNumber, returning a num: ints stay ints so integral
+  /// results still render as "3" (JS String(3)), not "3.0". Strings
+  /// parse as int when integral, else double; NaN and unparseable
+  /// strings are 0. Hex strings parse as 0 (Dart has no JS Number
+  /// hex parsing); that deviation is intentional and documented.
+  num _toNumber(Object? v) {
+    if (v is num) return v;
+    if (v is String) {
+      final s = v.trim();
+      final i = int.tryParse(s);
+      if (i != null) return i;
+      final n = double.tryParse(s);
+      if (n == null || n.isNaN) return 0;
+      // Integral doubles within the JS safe-integer range render
+      // as ints (JS prints 1000, not 1000.0); larger magnitudes and
+      // infinities stay double.
+      if (n == n.truncateToDouble() && n.abs() < 9007199254740992) {
+        return n.toInt();
+      }
+      return n;
+    }
+    if (v is bool) return v ? 1 : 0;
+    return 0;
+  }
+
+  /// JS Array-toString for the loose-equality object case: lists
+  /// join with commas (null elements become empty strings, as in
+  /// JS Array join), maps become '[object Object]'. Depth-capped so
+  /// cyclic host data cannot overflow the stack. Only called from
+  /// _looseEquals (on lists/maps) and on list elements, so a null
+  /// input here is always a list element, never a top-level value
+  /// (top-level null is intercepted by _looseEquals first).
+  String _jsString(Object? v, [int depth = 0]) {
+    if (v == null) return '';
+    if (v is String) return v;
+    if (v is bool) return v ? 'true' : 'false';
+    if (v is num) return '$v';
+    if (v is List) {
+      if (depth > 8) return '';
+      return v.map((e) => _jsString(e, depth + 1)).join(',');
+    }
+    return '[object Object]';
+  }
+
+  /// JavaScript loose equality (`==`), following the JS Abstract
+  /// Equality order: null only equals null; booleans coerce to
+  /// numbers first; two objects compare by identity only; an object
+  /// against a primitive converts to a primitive (lists join with
+  /// commas, maps become '[object Object]') before comparing; a
+  /// string against a number compares numerically, with unparseable
+  /// strings as NaN (equal to nothing) — unlike _toNumber, which
+  /// maps them to 0.
+  bool _looseEquals(Object? a, Object? b) {
+    if (a == null || b == null) return a == null && b == null;
+    if (a is bool || b is bool) {
+      return _looseEquals(
+        a is bool ? _toNumber(a) : a,
+        b is bool ? _toNumber(b) : b,
+      );
+    }
+    if (a is List || a is Map || b is List || b is Map) {
+      if (identical(a, b)) return true;
+      // Two objects are never loosely equal unless identical (JS);
+      // only an object against a primitive converts first.
+      if ((a is List || a is Map) && (b is List || b is Map)) {
+        return false;
+      }
+      final pa = a is List || a is Map ? _jsString(a) : a;
+      final pb = b is List || b is Map ? _jsString(b) : b;
+      if (pa is String || pb is String) return _looseEquals(pa, pb);
+      return false;
+    }
+    if (a is num && b is num) return a == b;
+    if (a is String && b is String) return a == b;
+    // One side is a string, the other a number: compare numerically,
+    // preserving NaN (unparseable strings equal nothing).
+    final na = _numberOrNaN(a);
+    final nb = _numberOrNaN(b);
+    if (na == null || nb == null) return false;
+    return na == nb;
+  }
+
+  /// JS Number() for loose equality, preserving NaN: returns null
+  /// for unparseable strings (JS NaN, which equals nothing), instead
+  /// of _toNumber's 0. Hex strings are unparseable by Dart, so they
+  /// land in NaN here (in _toNumber they are 0 by documented
+  /// deviation); either way they are not JS's 16.
+  num? _numberOrNaN(Object? v) {
+    if (v is num) return v;
+    if (v is String) {
+      final s = v.trim();
+      if (s.isEmpty) return 0;
+      final i = int.tryParse(s);
+      if (i != null) return i;
+      final n = double.tryParse(s);
+      if (n == null || n.isNaN) return null;
+      return n;
+    }
+    return null;
+  }
 
   Object? _evalAt(AtCallExpr e, bool expectAction) {
     if (_restricted) {
@@ -1628,8 +1847,9 @@ class _Evaluator {
       final old = _scope[varName];
       for (final item in array) {
         _scope[varName] = item;
-        final v = evalExpr(template, false);
-        if (v != null) out.add(v);
+        // Map semantics, like upstream: null results are kept, so
+        // data lists cannot shift positions.
+        out.add(evalExpr(template, false));
       }
       if (hadOld) {
         _scope[varName] = old;
@@ -1850,6 +2070,27 @@ class _Evaluator {
       if (prop.type == PropType.nodeList && value is List) {
         // Flatten one or more levels, so @Each results used as
         // Stack([tags]) keep their nodes instead of being dropped.
+        // Items _flattenNodes drops are surfaced instead of
+        // vanishing: every non-node, non-null, non-bool item is a
+        // type-mismatch. Null items are ignored, like React ignores
+        // null children (and like @Each keeping nulls, which would
+        // otherwise error on every gap); booleans are ignored too,
+        // like React ignores boolean children (and like
+        // `cond && Node` evaluating to false).
+        void reportDropped(List list) {
+          for (final item in list) {
+            if (item is List) {
+              reportDropped(item);
+            } else if (item != null &&
+                item is! bool &&
+                item is! ElementNode &&
+                item is! QueryLoading) {
+              _err(OpenUIError('type-mismatch', 'wrong type for ${prop.name} on ${e.name}'));
+            }
+          }
+        }
+
+        reportDropped(value);
         value = ElementNode('', {'children': value}, '').nodesOf('children');
       }
       props[prop.name] = value;
@@ -2108,7 +2349,9 @@ ParseResult parseOpenUI(String text, OpenUILibrary library, {Map<String, Object?
     final v = evaluator.evalStatement('root');
     if (v is ElementNode) root = v;
   } else {
-    // Fallback: first statement calling the library root component.
+    // Fallback: first statement calling the library root component
+    // that actually renders; a failed candidate no longer stops the
+    // search for a later one.
     for (final name in order) {
       final stmt = statements[name]!;
       if (stmt.expr is CallExpr && (stmt.expr as CallExpr).name == library.root) {
@@ -2116,8 +2359,8 @@ ParseResult parseOpenUI(String text, OpenUILibrary library, {Map<String, Object?
         if (v is ElementNode) {
           root = v;
           usedFallback = true;
+          break;
         }
-        break;
       }
     }
     if (root == null) {
@@ -2244,22 +2487,80 @@ String stripOpenUIFences(String input) {
       : blocks.join('\n');
 }
 
+/// Snapshot of [_ContextTracker] after one line, cached per line by
+/// the incremental parser so a suffix reprocess can resume the
+/// context filter mid-stream.
+class _ContextState {
+  const _ContextState(this.inContext, this.depth, this.seenOpen);
+  final bool inContext;
+  final int depth;
+  final bool seenOpen;
+}
+
+/// Stored-message context filter, shared by the one-shot and the
+/// incremental parser. A context block ends when its JSON closes,
+/// tracked by brace/bracket depth outside strings — not when a line
+/// merely starts with `}`, which pretty-printed nested JSON does on
+/// inner lines too. Markers always break out, and an unbalanced
+/// close ends the block like before.
+class _ContextTracker {
+  bool inContext = false;
+  int depth = 0;
+  bool seenOpen = false;
+
+  _ContextState snapshot() => _ContextState(inContext, depth, seenOpen);
+
+  void restore(_ContextState state) {
+    inContext = state.inContext;
+    depth = state.depth;
+    seenOpen = state.seenOpen;
+  }
+
+  /// Process one trimmed line. Returns true when the line is a
+  /// marker or belongs to the context block (skip it).
+  bool process(String line) {
+    if (line.startsWith(']]>openui:')) {
+      inContext = line.startsWith(']]>openui:context');
+      depth = 0;
+      seenOpen = false;
+      return true;
+    }
+    if (!inContext) return false;
+    var inString = false;
+    for (var i = 0; i < line.length; i++) {
+      final c = line[i];
+      if (inString) {
+        if (c == '\\') {
+          i++;
+        } else if (c == '"') {
+          inString = false;
+        }
+      } else if (c == '"') {
+        inString = true;
+      } else if (c == '{' || c == '[') {
+        depth++;
+        seenOpen = true;
+      } else if (c == '}' || c == ']') {
+        depth--;
+      }
+    }
+    if ((seenOpen && depth <= 0) || depth < 0) {
+      inContext = false;
+      depth = 0;
+      seenOpen = false;
+    }
+    return true;
+  }
+}
+
 /// Stored-message markers: skip marker lines; JSON context after
 /// ]]>openui:context is host data, not OpenUI Lang. Lines are kept
 /// untrimmed for fence matching; callers trim before parsing.
 List<String> _filterMessageMarkers(String text) {
-  var inContext = false;
+  final tracker = _ContextTracker();
   final lines = <String>[];
   for (final raw in text.split('\n')) {
-    final line = raw.trim();
-    if (line.startsWith(']]>openui:')) {
-      inContext = line.startsWith(']]>openui:context');
-      continue;
-    }
-    if (inContext) {
-      if (line.startsWith('}')) inContext = false;
-      continue;
-    }
+    if (tracker.process(raw.trim())) continue;
     lines.add(raw);
   }
   return lines;
@@ -2488,7 +2789,7 @@ class IncrementalOpenUIParser {
   // Line cache: raw lines, the context-filter state after each one,
   // and the processed lines derived from them.
   final List<String> _rawLines = [];
-  final List<bool> _contextAfter = [];
+  final List<_ContextState> _contextStates = [];
   final List<_ProcessedLine> _processed = [];
   final Map<String, _LineParse> _lineParseCache = {};
 
@@ -2512,7 +2813,6 @@ class IncrementalOpenUIParser {
   final Set<String> _evaluatorFailedQueries = {};
   final Map<String, Set<String>> _unresolvedBuckets = {};
   String? _lastRootName;
-  String? _fallbackName;
 
   // Snapshots for change detection.
   Map<String, Object?> _lastState = {};
@@ -2671,30 +2971,17 @@ class IncrementalOpenUIParser {
       }
     }
     _rawLines.length = prefix;
-    _contextAfter.length = prefix;
-    var inContext = prefix == 0 ? false : _contextAfter[prefix - 1];
+    _contextStates.length = prefix;
+    final tracker = _ContextTracker();
+    if (prefix > 0) tracker.restore(_contextStates[prefix - 1]);
     for (var i = prefix; i < rawLines.length; i++) {
       final raw = rawLines[i];
       final line = raw.trim();
-      if (line.startsWith(']]>openui:')) {
-        inContext = line.startsWith(']]>openui:context');
-        _rawLines.add(raw);
-        _contextAfter.add(inContext);
-        continue;
-      }
-      if (inContext) {
-        if (line.startsWith('}')) inContext = false;
-        _rawLines.add(raw);
-        _contextAfter.add(inContext);
-        continue;
-      }
-      if (line.isEmpty) {
-        _rawLines.add(raw);
-        _contextAfter.add(inContext);
-        continue;
-      }
+      final skip = tracker.process(line);
       _rawLines.add(raw);
-      _contextAfter.add(inContext);
+      _contextStates.add(tracker.snapshot());
+      if (skip) continue;
+      if (line.isEmpty) continue;
       var lp = _lineParseCache[line];
       if (lp == null) {
         lp = _parseLine(line);
@@ -2736,17 +3023,13 @@ class IncrementalOpenUIParser {
 
   String? _resolveRootName() {
     if (_statements.containsKey('root')) return 'root';
-    if (_fallbackName != null) {
-      final stmt = _statements[_fallbackName];
-      if (stmt != null && stmt.expr is CallExpr && (stmt.expr as CallExpr).name == library.root) {
-        return _fallbackName;
-      }
-      _fallbackName = null;
-    }
+    // Always rescan: a cached fallback only checks that its
+    // statement is still a root component, not that it is still
+    // first in order, so inserting a root component above it kept
+    // returning the stale one. The scan itself is small.
     for (final name in _order) {
       final stmt = _statements[name]!;
       if (stmt.expr is CallExpr && (stmt.expr as CallExpr).name == library.root) {
-        _fallbackName = name;
         return name;
       }
     }
