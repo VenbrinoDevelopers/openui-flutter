@@ -134,13 +134,15 @@ a `ChartColors` bundle; the series palette stays separate
 
 ## Charts
 
-Eight types, all drawn with `CustomPainter` (no chart package):
+Nine types, all drawn with `CustomPainter` (no chart package):
 Bar, Line, Area, HorizontalBar, Pie, Radial, SingleStackedBar,
-Scatter. Behavior follows React: hover tooltips (mouse hover and
-touch drag; a stationary tap shows nothing), legend click to hide a
-series or slice (pie re-normalizes, radial rings keep their radii,
-scales are computed over all series so toggling never rescales),
-zero-anchored nice domains with negatives, and stacked bars as a
+Scatter, Radar. Behavior follows React: hover tooltips (mouse hover
+and touch drag; a stationary tap shows nothing), legend click to
+hide a series or slice (pie re-normalizes, radial rings keep their
+radii, scales are computed over all series so toggling never
+rescales; SingleStackedBar's legend only hover-highlights and has
+no hide toggle), nice domains with negatives (zero-anchored except
+scatter axes, which use data domains), and stacked bars as a
 horizontal track.
 
 Bar/Line/Area accept three layout props (positional, after

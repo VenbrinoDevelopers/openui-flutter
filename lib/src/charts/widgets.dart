@@ -258,7 +258,10 @@ class _PieChartWidgetState extends State<PieChartWidget> with _LegendToggle<PieC
     int? pieHit(Offset pos, Size area) {
       final visible = <int>[for (var i = 0; i < widget.labels.length; i++) if (!hidden.contains(i)) i];
       final vals = [for (final i in visible) i < widget.values.length ? widget.values[i] : 0.0];
-      final hit = widget.appearance == 'semiCircular' ? _semiPieSliceAt(pos, area, vals) : _pieSliceAt(pos, area, vals);
+      // A donut's hole is empty (see _pieSliceAt); other variants
+      // have no hole.
+      final innerR = widget.variant == 'donut' ? 40.0 : 0.0;
+      final hit = widget.appearance == 'semiCircular' ? _semiPieSliceAt(pos, area, vals, innerR: innerR) : _pieSliceAt(pos, area, vals, innerR: innerR);
       if (hit < 0) return null;
       return visible[hit];
     }
@@ -381,7 +384,9 @@ class _RadialChartWidgetState extends State<RadialChartWidget> with _LegendToggl
     // Rings keep their index-based radii when hidden, so the hit
     // index is already the original one.
     int? ringHit(Offset pos, Size area) {
-      final hit = _radialRingAt(pos, area, widget.labels.length);
+      // The painter draws values.length rings; labels alone would
+      // admit ghost rings past the last value.
+      final hit = _radialRingAt(pos, area, math.min(widget.labels.length, widget.values.length));
       if (hit < 0 || hidden.contains(hit)) return null;
       return hit;
     }
@@ -526,9 +531,13 @@ class _ScatterChartWidgetState extends State<ScatterChartWidget> with _LegendTog
                   if (hit < 0) return null;
                   final d = layout.dots[hit];
                   final color = _colorAt(widget.palette, d.seriesIndex);
+                  final rows = <TipRow>[(label: 'x', value: _fmtGrouped(d.x), color: color), (label: 'y', value: _fmtGrouped(d.y), color: color)];
+                  // Bubble size is encoded by z, so a dot with z
+                  // names it in the tooltip.
+                  if (d.z != null) rows.add((label: 'z', value: _fmtGrouped(d.z!), color: color));
                   return (
                     title: widget.series[d.seriesIndex].stringOf('name'),
-                    rows: [(label: 'x', value: _fmtGrouped(d.x), color: color), (label: 'y', value: _fmtGrouped(d.y), color: color)],
+                    rows: rows,
                   );
                 },
                 onTap: (pos, area) {

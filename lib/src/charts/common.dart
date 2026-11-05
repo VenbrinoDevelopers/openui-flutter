@@ -27,6 +27,9 @@ class ChartColors {
 /// The axis label style in a chart's colours.
 TextStyle _axisLabelStyle(ChartColors colors) => TextStyle(fontSize: 10, color: colors.axisText);
 
+/// One share as a 1-decimal percentage string; a zero total reads 0.0%.
+String _sharePct(double value, double total) => total == 0 ? '0.0%' : '${(value / total * 100).toStringAsFixed(1)}%';
+
 /// Legend used by the cartesian/radar/scatter widgets: a swatch
 /// Container per series (the colour test in controller_theme_test
 /// pins this exact shape) plus the series label. With [onToggle]
@@ -48,11 +51,19 @@ class ChartLegend extends StatefulWidget {
 class _ChartLegendState extends State<ChartLegend> {
   bool _expanded = false;
 
+  // Hiding the last visible item is refused, like React's
+  // useSeriesVisibility ("at least one series stays visible").
+  void _toggle(int i) {
+    if (widget.onToggle == null) return;
+    if (!widget.hidden.contains(i) && widget.hidden.length >= widget.labels.length - 1) return;
+    widget.onToggle!(i);
+  }
+
   Widget _row(int i) {
     final row = Row(mainAxisSize: MainAxisSize.min, children: [Container(width: 10, height: 10, color: _colorAt(widget.palette, i)), const SizedBox(width: 4), Text(widget.labels[i])]);
     if (widget.onToggle == null) return row;
     return GestureDetector(
-      onTap: () => widget.onToggle!(i),
+      onTap: () => _toggle(i),
       child: MouseRegion(
         cursor: SystemMouseCursors.click,
         child: Opacity(
@@ -148,6 +159,12 @@ class _StackedLegend extends StatefulWidget {
 class _StackedLegendState extends State<_StackedLegend> {
   bool _expanded = false;
 
+  // Same last-visible guard as [_ChartLegendState._toggle].
+  void _toggle(int i) {
+    if (!widget.hidden.contains(i) && widget.hidden.length >= widget.labels.length - 1) return;
+    widget.onToggle(i);
+  }
+
   @override
   Widget build(BuildContext context) {
     // Labels and values can disagree in length (a hand-written
@@ -157,6 +174,9 @@ class _StackedLegendState extends State<_StackedLegend> {
     // read as 0.
     final values = [for (var i = 0; i < widget.labels.length; i++) i < widget.values.length ? widget.values[i] : 0.0];
     final visibleTotal = [for (var i = 0; i < values.length; i++) if (!widget.hidden.contains(i)) values[i]].fold<double>(0, (a, b) => a + b);
+    // Hidden rows keep their share of the original total, not the
+    // visible total: re-normalizing a dimmed row misleads.
+    final originalTotal = values.fold<double>(0, (a, b) => a + b);
     final showAll = _expanded || widget.labels.length <= 6;
     final shown = showAll ? widget.labels.length : 6;
     return Column(
@@ -164,7 +184,7 @@ class _StackedLegendState extends State<_StackedLegend> {
       children: [
         for (var i = 0; i < shown; i++)
           GestureDetector(
-            onTap: () => widget.onToggle(i),
+            onTap: () => _toggle(i),
             child: MouseRegion(
               cursor: SystemMouseCursors.click,
               onEnter: (_) => widget.onHover(i),
@@ -173,7 +193,7 @@ class _StackedLegendState extends State<_StackedLegend> {
                 opacity: widget.hidden.contains(i) ? 0.3 : 1.0,
                 child: SizedBox(
                   height: 32,
-                  child: Row(children: [Container(width: 10, height: 10, color: _colorAt(widget.palette, i)), const SizedBox(width: 8), Expanded(child: Text(widget.labels[i])), Text(visibleTotal == 0 ? '0.0%' : '${(values[i] / visibleTotal * 100).toStringAsFixed(1)}%')]),
+                  child: Row(children: [Container(width: 10, height: 10, color: _colorAt(widget.palette, i)), const SizedBox(width: 8), Expanded(child: Text(widget.labels[i])), Text(_sharePct(values[i], widget.hidden.contains(i) ? originalTotal : visibleTotal))]),
                 ),
               ),
             ),

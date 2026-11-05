@@ -8,8 +8,9 @@ library openui_charts;
 /// Kept identical to the old fl_chart rendering where it matters:
 /// the legend shape (a 10x10 swatch plus a label), the legend text
 /// formats ('label (value)' for pie/radial, 'label (xx%)' for the
-/// stacked bar), the box heights, and the value scales (bar/line
-/// maxY floors at 1.0, stacked bars scale by their stack sum).
+/// stacked bar), the box heights, and the value scales (all-zero
+/// data degenerates the domain to [0,1]; stacked bars scale by
+/// their stack sum).
 /// Changed on purpose: HorizontalBar category titles are drawn
 /// horizontal on the left instead of rotated (the old rotation
 /// wrapped them letter by letter in narrow columns), and a 1- or
@@ -19,6 +20,7 @@ library openui_charts;
 
 import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
 import '../core/lang.dart';

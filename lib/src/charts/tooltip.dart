@@ -79,13 +79,17 @@ int _categoryAtY(double dy, double height, int n) {
 /// Pie / donut slice by angle, mirroring [_PiePainter] geometry:
 /// circular starts at 3 o'clock, semi-circular at 9 o'clock and
 /// covers only the top half.
-int _pieSliceAt(Offset pos, Size size, List<double> values) {
+int _pieSliceAt(Offset pos, Size size, List<double> values, {double innerR = 0}) {
   final total = values.fold<double>(0, (a, b) => a + b);
   if (total <= 0 || values.isEmpty) return -1;
   final center = Offset(size.width / 2, size.height / 2);
   final outerR = math.min(size.width, size.height) / 2 - 4;
   if (outerR <= 0) return -1;
-  if ((pos - center).distance > outerR) return -1;
+  final dist = (pos - center).distance;
+  if (dist > outerR) return -1;
+  // A donut's hole is empty: the painter draws the ring only when
+  // outerR > 42, so the gate follows the same condition.
+  if (innerR > 0 && outerR > 42 && dist < innerR) return -1;
   var angle = math.atan2(pos.dy - center.dy, pos.dx - center.dx);
   if (angle < 0) angle += math.pi * 2;
   // The caller passes the already-filtered (visible) values; the
@@ -100,13 +104,16 @@ int _pieSliceAt(Offset pos, Size size, List<double> values) {
 
 /// Semi-circular pie slice: same geometry, but the bottom half is
 /// outside the chart and never hits.
-int _semiPieSliceAt(Offset pos, Size size, List<double> values) {
+int _semiPieSliceAt(Offset pos, Size size, List<double> values, {double innerR = 0}) {
   final total = values.fold<double>(0, (a, b) => a + b);
   if (total <= 0 || values.isEmpty) return -1;
   final center = Offset(size.width / 2, size.height / 2);
   final outerR = math.min(size.width, size.height) / 2 - 4;
   if (outerR <= 0) return -1;
-  if ((pos - center).distance > outerR) return -1;
+  final dist = (pos - center).distance;
+  if (dist > outerR) return -1;
+  // Same donut-hole gate as [_pieSliceAt].
+  if (innerR > 0 && outerR > 42 && dist < innerR) return -1;
   // Top half only: atan2 in [-pi, 0] maps to [0, pi] from 9 o'clock.
   var angle = math.atan2(pos.dy - center.dy, pos.dx - center.dx);
   if (angle > 0) return -1;
@@ -193,7 +200,9 @@ class _ChartTip extends StatelessWidget {
   const _ChartTip({required this.tip, this.colors = const ChartColors()});
   final TipData tip;
   // Only the border follows the theme: the card itself stays a
-  // light card (its text is uncoloured, so it inherits dark text).
+  // light card in any host theme, so its text is explicitly dark
+  // (inheriting the host's DefaultTextStyle would be unreadable
+  // under a dark theme).
   final ChartColors colors;
   @override
   Widget build(BuildContext context) {
@@ -218,8 +227,10 @@ class _ChartTip extends StatelessWidget {
           children: [
             Text(tip.title,
                 key: const Key('chart-tip-title'),
-                style:
-                    const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.black87)),
             for (var i = 0; i < tip.rows.length; i++)
               Row(
                 key: Key('chart-tip-row-$i'),
@@ -234,9 +245,12 @@ class _ChartTip extends StatelessWidget {
                   Flexible(
                       child: Text(tip.rows[i].label,
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontSize: 12))),
+                          style: const TextStyle(
+                              fontSize: 12, color: Colors.black87))),
                   const SizedBox(width: 12),
-                  Text(tip.rows[i].value, style: const TextStyle(fontSize: 12)),
+                  Text(tip.rows[i].value,
+                      style: const TextStyle(
+                          fontSize: 12, color: Colors.black87)),
                 ],
               ),
           ],
@@ -278,7 +292,11 @@ class _HoverAreaState extends State<_HoverArea> {
   // touch-drag tooltips (verified: the drag test fails with
   // onTapUp present). Raw pointer events sidestep the arena: a
   // down/up pair that never moved past slop is a tap, anything
-  // else is a drag and fires no click.
+  // else is a drag and fires no click. Only the primary button
+  // starts a tap, and only the first such pointer is tracked, so
+  // a right-click or a second finger can neither fire a tap nor
+  // hijack the first pointer's tap.
+  int? _downPointer;
   Offset? _downPos;
 
   void _update(Offset pos, Size area) {
@@ -316,9 +334,16 @@ class _HoverAreaState extends State<_HoverArea> {
               : math.max(0.0, pos.dy - 12 - estH);
         }
         return Listener(
-          onPointerDown: (e) => _downPos = e.localPosition,
+          onPointerDown: (e) {
+            if (e.buttons == kPrimaryButton && _downPointer == null) {
+              _downPointer = e.pointer;
+              _downPos = e.localPosition;
+            }
+          },
           onPointerUp: (e) {
+            if (e.pointer != _downPointer) return;
             final down = _downPos;
+            _downPointer = null;
             _downPos = null;
             if (down != null &&
                 (e.localPosition - down).distance < 18 &&
@@ -326,7 +351,12 @@ class _HoverAreaState extends State<_HoverArea> {
               widget.onTap!(e.localPosition, area);
             }
           },
-          onPointerCancel: (_) => _downPos = null,
+          onPointerCancel: (e) {
+            if (e.pointer == _downPointer) {
+              _downPointer = null;
+              _downPos = null;
+            }
+          },
           child: GestureDetector(
             onPanUpdate: (d) => _update(d.localPosition, area),
             onPanEnd: (_) => _clear(),

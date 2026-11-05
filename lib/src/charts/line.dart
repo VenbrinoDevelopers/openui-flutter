@@ -20,7 +20,10 @@ class _LinePlotPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    if (size.width <= 0 || size.height <= 0) return;
+    // Like the bar painter: with no categories there is nothing to
+    // draw, and without this the points collapse onto a degenerate
+    // vertical line at x = 0.
+    if (categories.isEmpty || size.width <= 0 || size.height <= 0) return;
     final domain = layout.domain;
     final plotH = layout.plotH;
     final n = categories.length;

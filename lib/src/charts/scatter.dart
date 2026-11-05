@@ -3,8 +3,9 @@ part of openui_charts;
 // ---------------- Scatter ----------------
 
 /// One scatter dot in data coordinates, with its bubble radius
-/// already resolved.
-typedef ScatterDot = ({double x, double y, double radius, int seriesIndex});
+/// already resolved. [z] is the raw bubble value, if any, so the
+/// tooltip can name it (React has no z concept).
+typedef ScatterDot = ({double x, double y, double radius, double? z, int seriesIndex});
 
 /// The scatter layout in data coordinates: dots plus the axis
 /// bounds the painter maps from.
@@ -31,7 +32,7 @@ ScatterLayout computeScatterLayout(List<ElementNode> series) {
     }
   }
   final dots = <ScatterDot>[
-    for (final p in raw) (x: p.x, y: p.y, radius: p.z == null ? 6 : (maxZ > 0 ? 4 + 8 * math.sqrt(p.z! / maxZ) : 4), seriesIndex: p.si),
+    for (final p in raw) (x: p.x, y: p.y, radius: p.z == null ? 6 : (maxZ > 0 ? 4 + 8 * math.sqrt(p.z! / maxZ) : 4), z: p.z, seriesIndex: p.si),
   ];
   if (dots.isEmpty) {
     minX = 0;

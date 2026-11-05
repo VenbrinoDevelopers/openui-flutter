@@ -96,17 +96,20 @@ class _BarPlotPainter extends CustomPainter {
           }
         }
       } else {
-        final rodW = m == 0 ? 0.0 : math.min(16.0, slot / m);
-        final startX = x0 + (slot - rodW * m) / 2;
-        for (var si = 0; si < m; si++) {
-          if (hidden.contains(si)) continue;
+        // Hidden series leave no gap: positions pack by visible
+        // index, while colours still use the original series index.
+        final visible = [for (var si = 0; si < m; si++) if (!hidden.contains(si)) si];
+        final rodW = visible.isEmpty ? 0.0 : math.min(16.0, slot / visible.length);
+        final startX = x0 + (slot - rodW * visible.length) / 2;
+        for (var vi = 0; vi < visible.length; vi++) {
+          final si = visible[vi];
           final v = ci < all[si].length ? all[si][ci] : 0.0;
           if (v == 0) continue;
           final paint = Paint()..color = _colorAt(palette, si);
           if (v > 0) {
-            _drawBarTop(canvas, Rect.fromLTWH(startX + si * rodW, y(v), rodW, baseline - y(v)), paint);
+            _drawBarTop(canvas, Rect.fromLTWH(startX + vi * rodW, y(v), rodW, baseline - y(v)), paint);
           } else {
-            _drawBarTop(canvas, Rect.fromLTWH(startX + si * rodW, baseline, rodW, y(v) - baseline), paint, flip: true);
+            _drawBarTop(canvas, Rect.fromLTWH(startX + vi * rodW, baseline, rodW, y(v) - baseline), paint, flip: true);
           }
         }
       }
@@ -192,17 +195,20 @@ class _HBarPlotPainter extends CustomPainter {
           }
         }
       } else {
-        final thick = m == 0 ? 0.0 : math.min(16.0, layout.rowH / m);
-        final startY = y0 + (layout.rowH - thick * m) / 2;
-        for (var si = 0; si < m; si++) {
-          if (hidden.contains(si)) continue;
+        // Same packing as the vertical grouped branch: hidden rows
+        // leave no gap, colours keep original indices.
+        final visible = [for (var si = 0; si < m; si++) if (!hidden.contains(si)) si];
+        final thick = visible.isEmpty ? 0.0 : math.min(16.0, layout.rowH / visible.length);
+        final startY = y0 + (layout.rowH - thick * visible.length) / 2;
+        for (var vi = 0; vi < visible.length; vi++) {
+          final si = visible[vi];
           final v = ci < all[si].length ? all[si][ci] : 0.0;
           if (v == 0) continue;
           final paint = Paint()..color = _colorAt(palette, si);
           if (v > 0) {
-            _drawBarTop(canvas, Rect.fromLTWH(baseline, startY + si * thick, x(v) - baseline, thick), paint, horizontal: true);
+            _drawBarTop(canvas, Rect.fromLTWH(baseline, startY + vi * thick, x(v) - baseline, thick), paint, horizontal: true);
           } else {
-            _drawBarTop(canvas, Rect.fromLTWH(x(v), startY + si * thick, baseline - x(v), thick), paint, horizontal: true, flip: true);
+            _drawBarTop(canvas, Rect.fromLTWH(x(v), startY + vi * thick, baseline - x(v), thick), paint, horizontal: true, flip: true);
           }
         }
       }

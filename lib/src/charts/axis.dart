@@ -382,7 +382,9 @@ CartesianLayout _cartesianLayoutPass({required List<String> categories, required
       }
     }
     contentWidth = n == 0 ? availableW : n * slotWidth;
-    if (n == 1) contentWidth = math.max(contentWidth, 200);
+    // No minimum-width floor for a single category: the slot must
+    // span the whole content, or hover lands in dead space that
+    // still reports a tooltip while the highlight stays in the slot.
     needsScroll = contentWidth > availableW;
     if (!needsScroll) {
       slotWidth = n == 0 ? 0 : availableW / n;
@@ -418,7 +420,9 @@ HBarLayout _hbarLayoutPass({required List<String> categories, required List<List
     final tp = TextPainter(text: TextSpan(text: c, style: _axisStyle), textDirection: TextDirection.ltr)..layout();
     labelW = math.max(labelW, tp.width);
   }
-  final labelArea = math.min(labelW, viewport.width * 0.4 - 8);
+  // Never negative: a negative maxWidth makes TextPainter.layout
+  // assert in debug builds.
+  final labelArea = math.max(0.0, math.min(labelW, viewport.width * 0.4 - 8));
   final barX = labelArea + 8;
   final barW = math.max(0.0, viewport.width - barX);
   final mm = stacked ? stackedMinMax(all, n) : minMaxOf(all);

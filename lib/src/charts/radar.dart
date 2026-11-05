@@ -53,7 +53,10 @@ class _RadarPainter extends CustomPainter {
     }
     // Values scale relative to the largest entry, so the biggest
     // value always reaches the outer ring; all-zero data sits at
-    // the center.
+    // the center. All-negative data collapses the same way (maxV
+    // starts at 0, so the scale is 0): React mirrors negative
+    // values out into a flipped polygon, but collapsing is the
+    // deliberate, more graceful behaviour here.
     final scale = maxV > 0 ? radius / maxV : 0.0;
     for (var si = 0; si < all.length; si++) {
       if (hidden.contains(si)) continue;
