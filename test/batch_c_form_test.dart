@@ -240,6 +240,26 @@ root = Select("city", [SelectItem("beijing", "Beijing"), SelectItem("shanghai", 
     expect((written.first as num).toDouble(), 100.0);
   });
 
+  testWidgets('Slider with a non-numeric state value renders instead of crashing', (tester) async {
+    // Regression: the slider value goes through _numbers, whose
+    // `as num?` cast threw on String elements.
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SingleChildScrollView(
+          child: OpenUIRenderer(
+            library: library,
+            response: 'root = Slider("vol", "continuous", 0, 100, null, null, "Volume", null, [50])',
+            initialState: const {
+              'vol': ['x'],
+            },
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byType(Slider), findsOneWidget);
+  });
+
   testWidgets('CheckBoxGroup writes a name-to-boolean record; SwitchGroup renders standalone', (tester) async {
     var state = <String, Object?>{};
     await tester.pumpWidget(

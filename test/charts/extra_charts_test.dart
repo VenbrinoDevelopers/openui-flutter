@@ -31,6 +31,27 @@ scatter = ScatterChart([ScatterSeries("散", [Point(1, 2), Point(3, 4)])])
     }
   });
 
+  testWidgets('pie chart with a non-numeric value renders instead of crashing', (tester) async {
+    // Regression: _numbers used an `as num?` cast that threw on
+    // String elements, crashing the whole subtree even though the
+    // program parsed with zero errors.
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SingleChildScrollView(
+          child: OpenUIRenderer(
+            library: openUIStandardLibrary(),
+            response: '''
+root = PieChart(["A", "B"], ["x", 1])
+''',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('A'), findsWidgets);
+    expect(find.text('B'), findsWidgets);
+  });
+
   testWidgets('radar chart with an empty series renders without crashing', (tester) async {
     await tester.pumpWidget(
       MaterialApp(

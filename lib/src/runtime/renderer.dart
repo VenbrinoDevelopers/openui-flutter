@@ -809,8 +809,20 @@ class _OpenUIRendererState extends State<OpenUIRenderer>
   }
 
   List<double> _numbers(Object? v) {
-    if (v is List) return v.map((e) => (e as num?)?.toDouble() ?? 0).toList();
+    if (v is List) return v.map(_toNum).toList();
     return const [];
+  }
+
+  /// React's `toNumber` for chart/slider values: numbers as-is,
+  /// numeric strings parsed (unparsable -> 0), booleans as 1/0,
+  /// everything else (including null) as 0. Never throws, so a
+  /// dirty query result cannot crash the subtree: the old
+  /// `as num?` cast threw on String elements.
+  double _toNum(Object? e) {
+    if (e is num) return e.toDouble();
+    if (e is String) return double.tryParse(e.trim()) ?? 0;
+    if (e is bool) return e ? 1 : 0;
+    return 0;
   }
 
   // ---- Flex layout (Stack / Card) ----
