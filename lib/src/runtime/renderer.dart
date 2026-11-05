@@ -43,6 +43,9 @@ abstract class RendererContext {
   Object? stateValue(String key);
   bool stateHas(String key);
   void setValue(String key, Object? value);
+  void markTouched(String key);
+  bool isTouched(String key);
+  bool hasCustomBuilder(String component);
   Future<void> dispatch(Object? action);
   Widget buildNode(ElementNode node);
   Widget flexLayout(ElementNode node, List<Widget> children);
@@ -80,9 +83,22 @@ class OpenUIRenderer extends StatefulWidget {
   final bool isStreaming;
   final void Function(ActionEvent)? onAction;
   final void Function(Map<String, Object?>)? onStateUpdate;
+  /// Initial form state, read once at mount; later changes to the
+  /// map passed here are ignored (standard initial* semantics).
+  /// In controller mode the controller owns state and this is
+  /// ignored. To reset after mount, dispatch a Reset action or
+  /// rebuild with a new widget key.
   final Map<String, Object?> initialState;
   final OpenUIToolProvider? toolProvider;
   final void Function(String tool, Object error)? onToolError;
+
+  /// Custom component builders. Lookup order: this registry first,
+  /// then the controller/library registry, then the built-in
+  /// builders. Note: an explicitly passed registry (even an empty
+  /// one) shadows the controller/library registry — components
+  /// found in neither fall back to the built-in builders, never
+  /// to the library registry. Pass null (the default) to use the
+  /// library registry.
   final ComponentRegistry? registry;
 
   /// Fired once with a parse's errors when streaming ends (or once
@@ -107,6 +123,11 @@ class OpenUIRenderer extends StatefulWidget {
 class _OpenUIRendererState extends State<OpenUIRenderer>
     implements RendererContext {
   late Map<String, Object?> _state;
+  // Fields the user has genuinely interacted with (first edit or
+  // blur), for FormControl validation. Key presence in state alone
+  // is not touch: initialState, Set actions and query defaults all
+  // put keys in state without interaction.
+  final Set<String> _touchedFields = {};
   final Map<String, Object?> _queryData = {};
   final Map<String, String> _queryParams = {};
   final Map<String, String> _fetchingParams = {};
@@ -144,6 +165,10 @@ class _OpenUIRendererState extends State<OpenUIRenderer>
   // streaming changes clear the cache; Query results arrive as new
   // nodes, so they miss naturally. Bounded: the cache clears at 1000
   // entries, so a long session cannot grow it without limit.
+  // Host contract: never mutate a state or query value in place
+  // (e.g. editing a list obtained from state). Change detection
+  // compares by identity, so an in-place edit is invisible to the
+  // cache and the UI goes stale; always assign a new object.
   final Map<ElementNode, Widget> _buildCache = {};
   var _stateReads = 0;
   var _customBuilderUsed = false;
@@ -156,6 +181,18 @@ class _OpenUIRendererState extends State<OpenUIRenderer>
 
   String _libraryFingerprint(OpenUILibrary library) {
     return [library.root, ...library.components.map((c) => c.name), ...library.functions.map((f) => f.name), ...library.actions.map((a) => a.name)].join('|');
+  }
+
+  /// Element-wise palette equality: lists have no value equality,
+  /// and identical() would clear the cache whenever a host rebuilds
+  /// an equal palette from a new list object.
+  bool _paletteEquals(List<Color>? a, List<Color>? b) {
+    if (identical(a, b)) return true;
+    if (a == null || b == null || a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
   }
 
   void _maybeFireParseCallbacks(ParseResult result, bool streaming) {
@@ -239,6 +276,36 @@ class _OpenUIRendererState extends State<OpenUIRenderer>
   @override
   void setValue(String key, Object? value) => _setValue(key, value);
   @override
+  void markTouched(String key) {
+    // A newly touched field can gain a live error (e.g. blurring an
+    // empty required field), so rebuild on the first touch. Edits
+    // already rebuild through _setValue; re-touching is a no-op.
+    if (_touchedFields.add(key) && mounted) setState(() {});
+  }
+  @override
+  bool isTouched(String key) => _touchedFields.contains(key);
+
+  /// Clears the touched flags for every key a Reset action removes.
+  /// State and touched must stay in step: a reset form must not show
+  /// errors until the user interacts again. Accepts a single action
+  /// or a list of them (the shape Button actions arrive in).
+  void _clearTouchedForReset(Object? action) {
+    if (action is ActionValue) {
+      if (action.name == 'Reset') {
+        for (final a in action.args) {
+          if (a is String) _touchedFields.remove(a);
+        }
+      }
+    } else if (action is List) {
+      for (final a in action) {
+        _clearTouchedForReset(a);
+      }
+    }
+  }
+  @override
+  bool hasCustomBuilder(String component) =>
+      _effectiveRegistry?.lookup(component) != null;
+  @override
   Future<void> dispatch(Object? action) => _dispatch(action);
   @override
   Widget buildNode(ElementNode node) => _buildNode(node);
@@ -284,15 +351,24 @@ class _OpenUIRendererState extends State<OpenUIRenderer>
   Object? _stateValue(String key) {
     // Counts as a state read for memoization: a subtree that read
     // form state during build is never cached (see _buildNode).
+    // Reads go through the controller's direct accessors, not the
+    // copying formState getter, so a build over a large form does
+    // not copy the whole map on every read.
     _stateReads++;
-    return _controllerMode ? widget.controller!.formState[key] : _state[key];
+    return _controllerMode ? widget.controller!.formValue(key) : _state[key];
   }
 
   bool _stateHas(String key) {
     _stateReads++;
-    return _controllerMode ? widget.controller!.formState.containsKey(key) : _state.containsKey(key);
+    return _controllerMode ? widget.controller!.hasFormValue(key) : _state.containsKey(key);
   }
   void _setValue(String key, Object? value) {
+    // Every setValue call originates from a widget interaction
+    // (onChanged handlers, Save Changes): it is the real-touch
+    // signal for FormControl validation, unlike mere key presence
+    // in state (initialState, Set actions, query defaults), which
+    // never passes through here.
+    _touchedFields.add(key);
     if (_controllerMode) {
       widget.controller!.setFormValue(key, value);
     } else {
@@ -377,6 +453,12 @@ class _OpenUIRendererState extends State<OpenUIRenderer>
 
   Future<void> _dispatch(Object? action) async {
     if (_controllerMode) {
+      // The controller clears only its own state on Reset, so clear
+      // the matching touched flags here before delegating; otherwise
+      // a required-field error reappears right after Reset with no
+      // new interaction (same fix as the renderer-mode Reset branch
+      // in _dispatchSingle below).
+      setState(() => _clearTouchedForReset(action));
       await widget.controller!.runAction(action);
       return;
     }
@@ -403,7 +485,10 @@ class _OpenUIRendererState extends State<OpenUIRenderer>
       case 'Reset':
         setState(() {
           for (final a in action.args) {
-            if (a is String) _state.remove(a);
+            if (a is String) {
+              _state.remove(a);
+              _touchedFields.remove(a);
+            }
           }
         });
         widget.onStateUpdate?.call(Map.of(_state));
@@ -441,6 +526,9 @@ class _OpenUIRendererState extends State<OpenUIRenderer>
           _failedParams.remove(query.statementName);
           _queryErrors.remove(query.statementName);
           _scheduleFetches([query]);
+          // Rebuild immediately so the query shows its loading
+          // state instead of stale data until the fetch completes.
+          if (mounted) setState(() {});
           widget.onAction?.call(ActionEvent('run', action.args, Map.of(_state)));
           return true;
         }
@@ -497,14 +585,15 @@ class _OpenUIRendererState extends State<OpenUIRenderer>
       return const Text('暂无可显示的界面');
     }
     // Memoization invalidation, before any _buildNode call: theme
-    // (compared field-wise — the const light/dark themes are
-    // identical objects, while a host rebuilding an equal theme from
-    // new objects clears conservatively) and streaming (enabled
-    // flags flip when it ends).
+    // colors, palette and radius are compared by value, so a host
+    // rebuilding an equal theme from new objects does not clear
+    // the cache; the builder callbacks have no value equality and
+    // are still compared by identity. Streaming flags flip when
+    // streaming ends.
     final theme = _theme;
-    if (!identical(theme.colors, _lastThemeColors) ||
+    if (theme.colors != _lastThemeColors ||
         theme.cardRadius != _lastThemeCardRadius ||
-        !identical(theme.chartPalette, _lastThemePalette) ||
+        !_paletteEquals(theme.chartPalette, _lastThemePalette) ||
         !identical(theme.skeletonBuilder, _lastThemeSkeletonBuilder) ||
         !identical(theme.errorBuilder, _lastThemeErrorBuilder) ||
         _lastStreaming != streaming) {
@@ -1126,6 +1215,15 @@ Widget _buildImage(BuildContext context, ElementNode node, RendererContext ctx) 
   );
 }
 
+/// React's `asArray` for Table column data: null renders as no
+/// rows, a list renders as-is, and a scalar renders as a single
+/// row instead of being dropped.
+List<Object?> _asArray(Object? data) {
+  if (data == null) return const [];
+  if (data is List) return data;
+  return [data];
+}
+
 Widget _buildTable(BuildContext context, ElementNode node, RendererContext ctx) {
   final cols = node.nodesOf('columns');
   if (cols.isEmpty) return const SizedBox.shrink();
@@ -1153,7 +1251,7 @@ Widget _buildTable(BuildContext context, ElementNode node, RendererContext ctx) 
   // of an empty DataTable. (A Col with genuinely empty values
   // is not a skeleton and still renders a normal table.)
   if (cols.any((c) => c.component == '__Skeleton')) return const TableSkeleton();
-  final rows = cols.map((c) => (c.props['data'] as List?) ?? const []).toList();
+  final rows = cols.map((c) => _asArray(c.props['data'])).toList();
   final rowCount = rows.fold<int>(0, (m, r) => math.max(m, r.length));
   return SingleChildScrollView(
     scrollDirection: Axis.horizontal,
@@ -1190,6 +1288,94 @@ Widget _buildForm(BuildContext context, ElementNode node, RendererContext ctx) {
   );
 }
 
+/// A text field whose displayed text follows the external [value]:
+/// unlike TextFormField(initialValue:), which reads its initial
+/// value once, this widget syncs its controller whenever [value]
+/// changes (external state edits, Set/Reset actions, host state).
+/// User typing is never clobbered: syncing only assigns when the
+/// controller text differs, so keystrokes (which echo back through
+/// onChanged with the same text) keep focus and cursor. Never use
+/// a ValueKey(value) here: it would rebuild on every keystroke
+/// and drop focus.
+class _SyncedTextField extends StatefulWidget {
+  const _SyncedTextField({
+    required this.value,
+    this.enabled = true,
+    this.obscureText = false,
+    this.keyboardType,
+    this.maxLines = 1,
+    this.readOnly = false,
+    this.decoration,
+    this.onChanged,
+    this.onTap,
+    this.onBlur,
+  });
+  final String value;
+  final bool enabled;
+  final bool obscureText;
+  final TextInputType? keyboardType;
+  final int maxLines;
+  final bool readOnly;
+  final InputDecoration? decoration;
+  final void Function(String)? onChanged;
+  final VoidCallback? onTap;
+  final VoidCallback? onBlur;
+  @override
+  State<_SyncedTextField> createState() => _SyncedTextFieldState();
+}
+
+class _SyncedTextFieldState extends State<_SyncedTextField> {
+  late final TextEditingController _controller;
+  late final FocusNode _focusNode;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(text: widget.value);
+    _focusNode = FocusNode();
+    _focusNode.addListener(_onFocusChange);
+  }
+
+  void _onFocusChange() {
+    if (!_focusNode.hasFocus) widget.onBlur?.call();
+  }
+
+  @override
+  void didUpdateWidget(covariant _SyncedTextField oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.value != _controller.text) {
+      _controller.value = TextEditingValue(
+        text: widget.value,
+        selection: TextSelection.collapsed(offset: widget.value.length),
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    _focusNode.removeListener(_onFocusChange);
+    _focusNode.dispose();
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return TextFormField(
+      controller: _controller,
+      focusNode: _focusNode,
+      enabled: widget.enabled,
+      obscureText: widget.obscureText,
+      keyboardType: widget.keyboardType,
+      maxLines: widget.maxLines,
+      readOnly: widget.readOnly,
+      decoration: widget.decoration,
+      onChanged: widget.onChanged,
+      onTap: widget.onTap,
+    );
+  }
+}
+
 Widget _buildInput(BuildContext context, ElementNode node, RendererContext ctx) {
   // State key is `name`; the old `label`/`bind` props are gone
   // (the label belongs on FormControl now).
@@ -1198,8 +1384,8 @@ Widget _buildInput(BuildContext context, ElementNode node, RendererContext ctx) 
   final inputType = node.stringOf('type', 'text');
   return Padding(
     padding: const EdgeInsets.symmetric(vertical: 6),
-    child: TextFormField(
-      initialValue: initial,
+    child: _SyncedTextField(
+      value: initial,
       enabled: !ctx.isStreaming,
       obscureText: inputType == 'password',
       keyboardType: switch (inputType) {
@@ -1213,6 +1399,7 @@ Widget _buildInput(BuildContext context, ElementNode node, RendererContext ctx) 
         border: const OutlineInputBorder(),
       ),
       onChanged: (v) => ctx.setValue(inputKey, v),
+      onBlur: () => ctx.markTouched(inputKey),
     ),
   );
 }
@@ -1587,6 +1774,23 @@ Widget _buildIcon(BuildContext context, ElementNode node, RendererContext ctx) {
 }
 
 // ---- Data (remaining) ----
+/// Table column widths accept numbers or numeric strings ("120");
+/// anything else falls back to 120 instead of throwing.
+double _tableColumnWidth(Object? raw) {
+  if (raw is num) {
+    final w = raw.toDouble();
+    return w.isFinite ? w : 120.0;
+  }
+  if (raw is String) {
+    // double.tryParse accepts 'NaN'/'Infinity', which would break
+    // layout; treat non-finite results as an absent width.
+    final parsed = double.tryParse(raw.trim());
+    if (parsed != null && parsed.isFinite) return parsed;
+    return 120.0;
+  }
+  return 120.0;
+}
+
 Widget _buildEditableTable(BuildContext context, ElementNode node, RendererContext ctx) {
   // React shape: name/columns objects/data rows. Cell edits
   // write immediately to form state under
@@ -1610,23 +1814,33 @@ Widget _buildEditableTable(BuildContext context, ElementNode node, RendererConte
     final column = columns[ci];
     final key = '$namespace:${dataRows[r]['id'] ?? '$r'}:${column['key'] ?? 'default'}';
     final current = cellValue(r, ci);
-    final width = (column['width'] as num?)?.toDouble() ?? 120;
+    final width = _tableColumnWidth(column['width']);
     final type = '${column['type'] ?? 'text'}';
     Widget field;
     switch (type) {
       case 'select':
         final options = ctx.mapList(column['options']);
         final currentValue = current;
+        // The FormField variant's value parameter is deprecated, so
+        // the selection follows external changes via initialValue
+        // plus a key on the effective selection: a key change
+        // rebuilds the field state, which re-reads initialValue.
+        // (A key is safe here: a dropdown holds no text cursor,
+        // unlike the text cells, where ValueKey would drop focus.
+        // The cell key is part of the ValueKey so two select cells
+        // in one row never collide.)
+        final effective = options.any((o) => o['value'] == currentValue) ? currentValue : null;
         field = DropdownButtonFormField<Object?>(
-          initialValue: options.any((o) => o['value'] == currentValue) ? currentValue : null,
+          key: ValueKey('$key:$effective'),
+          initialValue: effective,
           decoration: const InputDecoration(border: InputBorder.none),
           items: [for (final o in options) DropdownMenuItem<Object?>(value: o['value'], child: Text('${o['label'] ?? o['value'] ?? ''}'))],
           onChanged: (v) => ctx.setValue(key, v),
         );
       case 'date-single':
         final initial = current == null ? '' : '$current';
-        field = TextFormField(
-          initialValue: initial,
+        field = _SyncedTextField(
+          value: initial,
           readOnly: true,
           decoration: const InputDecoration(border: InputBorder.none),
           onTap: () async {
@@ -1638,22 +1852,22 @@ Widget _buildEditableTable(BuildContext context, ElementNode node, RendererConte
           },
         );
       case 'number':
-        field = TextFormField(
-          initialValue: current == null ? '' : '$current',
+        field = _SyncedTextField(
+          value: current == null ? '' : '$current',
           keyboardType: TextInputType.number,
           decoration: const InputDecoration(border: InputBorder.none),
           onChanged: (v) => ctx.setValue(key, int.tryParse(v) ?? double.tryParse(v) ?? v),
         );
       case 'url':
-        field = TextFormField(
-          initialValue: current == null ? '' : '$current',
+        field = _SyncedTextField(
+          value: current == null ? '' : '$current',
           keyboardType: TextInputType.url,
           decoration: const InputDecoration(border: InputBorder.none),
           onChanged: (v) => ctx.setValue(key, v),
         );
       default:
-        field = TextFormField(
-          initialValue: current == null ? '' : '$current',
+        field = _SyncedTextField(
+          value: current == null ? '' : '$current',
           decoration: const InputDecoration(border: InputBorder.none),
           onChanged: (v) => ctx.setValue(key, v),
         );
@@ -1727,6 +1941,7 @@ Widget _buildScatterChart(BuildContext context, ElementNode node, RendererContex
   return _LabeledChart(
     xLabel: node.props['xLabel'] is String ? node.stringOf('xLabel') : null,
     yLabel: node.props['yLabel'] is String ? node.stringOf('yLabel') : null,
+    colors: ctx.chartColors,
     child: ScatterChartWidget(series: ctx.datasetNodes(node.props['datasets']), palette: ctx.theme.chartPalette, colors: ctx.chartColors),
   );
 }
@@ -1821,8 +2036,11 @@ Widget _buildFormControl(BuildContext context, ElementNode node, RendererContext
   // The mapper does not enforce the input union: any node is
   // accepted as `input`. Rules are validated live with
   // validateRules, but only for touched fields: a field counts
-  // as touched when its name key exists in form state (i.e. the
-  // user changed it), so untouched fields never show an error.
+  // as touched when the user first edits it or moves focus away
+  // (tracked explicitly via markTouched), never merely because
+  // its name key exists in form state — initialState, Set
+  // actions and query defaults all put keys in state without any
+  // user interaction, so untouched fields never show an error.
   // There is no submit gate; hosts can call validateRules
   // directly for submit-time validation.
   final inputNode = node.nodeOf('input');
@@ -1831,7 +2049,10 @@ Widget _buildFormControl(BuildContext context, ElementNode node, RendererContext
   String? validationError;
   if (inputNode != null && inputRules is Map) {
     final inputName = inputNode.stringOf('name');
-    if (inputName.isNotEmpty && ctx.stateHas(inputName)) {
+    // Touched alone gates the error: an absent value validates as
+    // null, so a required field blurred without typing still
+    // reports (a stateHas gate would hide exactly that case).
+    if (inputName.isNotEmpty && ctx.isTouched(inputName)) {
       validationError = validateRules(inputRules, ctx.stateValue(inputName));
     }
   }
@@ -1853,12 +2074,13 @@ Widget _buildTextArea(BuildContext context, ElementNode node, RendererContext ct
   final initial = ctx.stateHas(areaKey) ? '${ctx.stateValue(areaKey)}' : (node.props['value'] == null ? '' : '${node.props['value']}');
   return Padding(
     padding: const EdgeInsets.symmetric(vertical: 6),
-    child: TextFormField(
-      initialValue: initial,
+    child: _SyncedTextField(
+      value: initial,
       maxLines: node.props['rows'] is num ? (node.props['rows'] as num).toInt() : 4,
       enabled: !ctx.isStreaming,
       decoration: InputDecoration(hintText: node.props['placeholder'] is String ? node.stringOf('placeholder') : null, border: const OutlineInputBorder()),
       onChanged: (v) => ctx.setValue(areaKey, v),
+      onBlur: () => ctx.markTouched(areaKey),
     ),
   );
 }
@@ -2007,12 +2229,13 @@ Widget _buildListBlock(BuildContext context, ElementNode node, RendererContext c
   final listItems = node.nodesOf('items');
   Widget listBody;
   if (node.stringOf('variant', '') == 'number') {
-    // Numbered leading is a ListBlock-level concern, so this
-    // path renders items directly and bypasses custom ListItem
-    // registry builders for them.
+    // Numbered leading is a ListBlock-level concern, but a host
+    // ListItem builder still wins when one is registered: only
+    // fall back to the numbered tile when no custom builder exists.
+    final useCustom = ctx.hasCustomBuilder('ListItem');
     listBody = Column(
       children: [
-        for (var i = 0; i < listItems.length; i++) ctx.numberedListTile(listItems[i], i + 1),
+        for (var i = 0; i < listItems.length; i++) useCustom ? ctx.buildNode(listItems[i]) : ctx.numberedListTile(listItems[i], i + 1),
       ],
     );
   } else {
@@ -2107,21 +2330,24 @@ Widget _buildVisualCardItem(BuildContext context, ElementNode node, RendererCont
   );
 }
 
-/// Axis labels for charts: yLabel above, xLabel below, both small and muted.
+/// Axis labels for charts: yLabel above, xLabel below, both small
+/// and muted. The color comes from the chart theme (axisText), not
+/// a hardcoded grey, so labels stay readable on dark themes.
 class _LabeledChart extends StatelessWidget {
-  const _LabeledChart({required this.child, this.xLabel, this.yLabel});
+  const _LabeledChart({required this.child, this.xLabel, this.yLabel, this.colors = const ChartColors()});
   final Widget child;
   final String? xLabel;
   final String? yLabel;
+  final ChartColors colors;
   @override
   Widget build(BuildContext context) {
     if (xLabel == null && yLabel == null) return child;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (yLabel != null) Padding(padding: const EdgeInsets.only(bottom: 4), child: Text(yLabel!, style: const TextStyle(color: Colors.grey, fontSize: 12))),
+        if (yLabel != null) Padding(padding: const EdgeInsets.only(bottom: 4), child: Text(yLabel!, style: TextStyle(color: colors.axisText, fontSize: 12))),
         child,
-        if (xLabel != null) Padding(padding: const EdgeInsets.only(top: 4), child: Center(child: Text(xLabel!, style: const TextStyle(color: Colors.grey, fontSize: 12)))),
+        if (xLabel != null) Padding(padding: const EdgeInsets.only(top: 4), child: Center(child: Text(xLabel!, style: TextStyle(color: colors.axisText, fontSize: 12)))),
       ],
     );
   }
@@ -2150,11 +2376,25 @@ class _ModalWidgetState extends State<_ModalWidget> {
   var _dismissed = false;
   var _showScheduled = false;
   var _reopenAfterClose = false;
+  // Bumping this rebuilds only the open dialog's content from the
+  // current node, so streaming updates and state changes inside
+  // an open dialog show up without closing and reopening it.
+  final _contentVersion = ValueNotifier<int>(0);
+  // A bump scheduled but not yet delivered: didUpdateWidget runs
+  // during the parent build, and notifying the dialog route's
+  // listener synchronously would mark it dirty mid-build.
+  var _contentBumpScheduled = false;
 
   @override
   void initState() {
     super.initState();
     _scheduleShow();
+  }
+
+  @override
+  void dispose() {
+    _contentVersion.dispose();
+    super.dispose();
   }
 
   @override
@@ -2185,6 +2425,23 @@ class _ModalWidgetState extends State<_ModalWidget> {
       _dialogShown = false;
       _showScheduled = false;
     }
+    // Live dialog content: the dialog route was built once, so
+    // without this a state change or streaming update inside an
+    // open dialog would never show. Rebuilding is cheap and
+    // stateful descendants keep their state by position, so no
+    // fingerprinting is needed. Statement changes keep the
+    // existing close-and-reopen behavior above and are excluded
+    // here to avoid morphing one statement's dialog into another.
+    // The bump is deferred to post-frame: didUpdateWidget runs
+    // during the parent build, and notifying the route's listener
+    // synchronously would mark it dirty mid-build.
+    if (_dialogShown && widget.node.statementId == oldWidget.node.statementId && !_contentBumpScheduled) {
+      _contentBumpScheduled = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _contentBumpScheduled = false;
+        if (mounted && _dialogShown) _contentVersion.value++;
+      });
+    }
     _scheduleShow();
   }
 
@@ -2207,9 +2464,14 @@ class _ModalWidgetState extends State<_ModalWidget> {
           content: SizedBox(
             width: dialogWidth,
             child: SingleChildScrollView(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [for (final c in widget.node.nodesOf('children')) widget.buildNode(c)],
+              child: ValueListenableBuilder<int>(
+                valueListenable: _contentVersion,
+                builder: (context, _, __) {
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [for (final c in widget.node.nodesOf('children')) widget.buildNode(c)],
+                  );
+                },
               ),
             ),
           ),
@@ -2473,7 +2735,7 @@ class _ChartWidget extends StatelessWidget {
       case _ChartKind.area:
         chart = LineChartWidget(categories: categories, series: series, palette: palette, area: true, curved: curve == 'natural', step: curve == 'step', height: height ?? 220, density: density, condensed: condensed, tickVariant: tickVariant, colors: colors);
     }
-    return _LabeledChart(xLabel: xLabel, yLabel: yLabel, child: chart);
+    return _LabeledChart(xLabel: xLabel, yLabel: yLabel, colors: colors, child: chart);
   }
 }
 

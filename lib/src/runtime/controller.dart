@@ -50,6 +50,11 @@ class OpenUIController extends ChangeNotifier {
   Stream<OpenUIError> get onError => _errorController.stream;
 
   Map<String, Object?> get formState => Map.of(_formState);
+
+  /// Direct single-key form-state reads for renderer use: unlike
+  /// [formState], these do not copy the whole map on every read.
+  Object? formValue(String key) => _formState[key];
+  bool hasFormValue(String key) => _formState.containsKey(key);
   Map<String, Object?> get queryData => Map.of(_queryData);
   bool get isStreaming => _streaming;
 
@@ -247,6 +252,9 @@ class OpenUIController extends ChangeNotifier {
           _failedQueries.remove(query.statementName);
           _queryErrors.remove(query.statementName);
           _scheduleFetches([query]);
+          // Notify immediately so renderers show the loading state
+          // instead of stale data until the fetch completes.
+          _notify();
           _actionController.add(ActionEvent('run', action.args, Map.of(_formState)));
           return true;
         }

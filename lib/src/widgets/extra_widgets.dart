@@ -421,6 +421,14 @@ class _SwitchGroupWidgetState extends State<SwitchGroupWidget> {
 
 // ---------------- Date picker / slider fields ----------------
 
+/// Clamp a date into a picker's range: showDatePicker asserts its
+/// initial date lies within firstDate..lastDate.
+DateTime _clampDate(DateTime date, DateTime first, DateTime last) {
+  if (date.isBefore(first)) return first;
+  if (date.isAfter(last)) return last;
+  return date;
+}
+
 class DatePickerField extends StatelessWidget {
   const DatePickerField({required this.stateKey, required this.value, required this.onChanged, this.enabled = true});
   final String? stateKey;
@@ -437,7 +445,12 @@ class DatePickerField extends StatelessWidget {
           OutlinedButton(
             onPressed: enabled
                 ? () async {
-                    final picked = await showDatePicker(context: context, initialDate: DateTime.now(), firstDate: DateTime(2000), lastDate: DateTime(2100));
+                    // Open on the current value when it parses (and
+                    // clamp it into range: showDatePicker asserts
+                    // initialDate is within firstDate..lastDate).
+                    final parsed = DateTime.tryParse(value ?? '');
+                    final initial = parsed == null ? DateTime.now() : _clampDate(parsed, DateTime(1900), DateTime(2100));
+                    final picked = await showDatePicker(context: context, initialDate: initial, firstDate: DateTime(1900), lastDate: DateTime(2100));
                     if (picked != null) {
                       final iso = '${picked.year}-${picked.month.toString().padLeft(2, '0')}-${picked.day.toString().padLeft(2, '0')}';
                       onChanged(stateKey, iso);
@@ -480,7 +493,18 @@ class DateRangeField extends StatelessWidget {
           OutlinedButton(
             onPressed: enabled
                 ? () async {
-                    final picked = await showDateRangePicker(context: context, firstDate: DateTime(2000), lastDate: DateTime(2100));
+                    // Open on the current range when both ends parse
+                    // (clamped into range, and only when start is not
+                    // after end: showDateRangePicker asserts both).
+                    final fromParsed = from == null ? null : DateTime.tryParse(from);
+                    final toParsed = to == null ? null : DateTime.tryParse(to);
+                    DateTimeRange? initialRange;
+                    if (fromParsed != null && toParsed != null) {
+                      final start = _clampDate(fromParsed, DateTime(1900), DateTime(2100));
+                      final end = _clampDate(toParsed, DateTime(1900), DateTime(2100));
+                      if (!start.isAfter(end)) initialRange = DateTimeRange(start: start, end: end);
+                    }
+                    final picked = await showDateRangePicker(context: context, initialDateRange: initialRange, firstDate: DateTime(1900), lastDate: DateTime(2100));
                     if (picked != null) {
                       onChanged(stateKey, {'from': iso(picked.start), 'to': iso(picked.end)});
                     }
@@ -507,6 +531,10 @@ class SliderField extends StatelessWidget {
   final bool enabled;
   @override
   Widget build(BuildContext context) {
+    // An inverted min/max (an invalid program) must not throw in
+    // clamp: order the bounds first. The label keeps the raw value.
+    final lo = min < max ? min : max;
+    final hi = min < max ? max : min;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6),
       child: Column(
@@ -514,9 +542,9 @@ class SliderField extends StatelessWidget {
         children: [
           Text(label != null ? '$label: ${value.toStringAsFixed(0)}' : value.toStringAsFixed(0)),
           Slider(
-            value: value.clamp(min, max),
-            min: min,
-            max: max,
+            value: value.clamp(lo, hi),
+            min: lo,
+            max: hi,
             divisions: divisions,
             onChanged: enabled ? (v) => onChanged(stateKey, v) : null,
           ),

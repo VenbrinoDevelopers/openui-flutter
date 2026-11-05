@@ -40,6 +40,26 @@ class OpenUIColorScheme {
   final Color warning;
   final Color danger;
   final Color info;
+
+  /// Value equality: colors compare by value, so a host rebuilding
+  /// an equal scheme from new objects does not invalidate caches
+  /// that key on theme identity.
+  @override
+  bool operator ==(Object other) =>
+      other is OpenUIColorScheme &&
+      primary == other.primary &&
+      surface == other.surface &&
+      onSurface == other.onSurface &&
+      textMuted == other.textMuted &&
+      border == other.border &&
+      grid == other.grid &&
+      success == other.success &&
+      warning == other.warning &&
+      danger == other.danger &&
+      info == other.info;
+
+  @override
+  int get hashCode => Object.hash(primary, surface, onSurface, textMuted, border, grid, success, warning, danger, info);
 }
 
 /// Visual theme for the renderer. Hosts pass one to [OpenUIController];
