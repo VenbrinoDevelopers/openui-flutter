@@ -36,4 +36,22 @@ root = MarkDownRenderer("# 标题\\n\\n- 一\\n- 二\\n\\n| a | b |\\n|---|---|\
     expect(find.byTooltip('Copy'), findsOneWidget);
     expect(tester.widget<HighlightView>(find.byType(HighlightView)).source, contains('``` nested'));
   });
+
+  testWidgets('streamed incomplete Markdown keeps code and links available', (tester) async {
+    await tester.pumpWidget(MaterialApp(
+      theme: ThemeData.dark(),
+      home: Scaffold(body: OpenUIRenderer(
+        library: openUIStandardLibrary(),
+        response: 'root = MarkDownRenderer("[Docs](https://openui.com)\\n\\n```dart\\nvoid main()")',
+        isStreaming: true,
+      )),
+    ));
+    await tester.pump();
+    final streamdown = tester.widget<Streamdown>(find.byType(Streamdown));
+    expect(streamdown.parseIncompleteMarkdown, isTrue);
+    expect(streamdown.onLinkTap, isNotNull);
+    expect(find.text('Docs'), findsOneWidget);
+    expect(find.byType(HighlightView), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
 }

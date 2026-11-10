@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import 'package:streamdown/streamdown.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'controller.dart';
 import '../charts/charts.dart';
@@ -2533,6 +2534,11 @@ class _MarkdownWidget extends StatelessWidget {
       showCaret: false,
       parseIncompleteMarkdown: streaming,
       lineNumbers: false,
+      onLinkTap: (uri) {
+        if (uri.scheme == 'https' || uri.scheme == 'http') {
+          unawaited(launchUrl(uri, mode: LaunchMode.externalApplication));
+        }
+      },
     );
   }
 }
