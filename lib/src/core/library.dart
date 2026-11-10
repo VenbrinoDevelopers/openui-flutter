@@ -109,7 +109,7 @@ List<ComponentDef> _baseComponents() => [
         PropDef('subtextVariant', _s, defaultValue: 'text'),
         PropDef('size', _s, defaultValue: 'sm'),
       ]),
-      const ComponentDef('MarkDownRenderer', 'Markdown text rendered by flutter_markdown_plus (full Markdown). variant: clear/card/sunk.', [
+      const ComponentDef('MarkDownRenderer', 'Markdown text rendered by Streamdown, including streamed content and syntax-highlighted code. variant: clear/card/sunk.', [
         PropDef('textMarkdown', _s, required: true),
         PropDef('variant', _s),
       ]),
@@ -160,7 +160,7 @@ List<ComponentDef> _baseComponents() => [
         PropDef('bold', _b, defaultValue: false),
         PropDef('layout', _s, defaultValue: 'horizontal'),
       ]),
-      const ComponentDef('CodeBlock', 'Code block, plain text (no highlighting). language first, then codeString.', [
+      const ComponentDef('CodeBlock', 'Syntax-highlighted code block with language label and copy. language first, then codeString.', [
         PropDef('language', _s, required: true),
         PropDef('codeString', _s, required: true),
       ]),

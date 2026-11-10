@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased (Jovita fork)
+
+- Render `MarkDownRenderer` and `CodeBlock` with the pinned Venbrino Streamdown fork. Code blocks now have highlighting, a language label, and copy. This Git-only fork is not published to pub.dev.
+
 ## 0.18.2
 
 - Aligned with OpenUI Lang 1.1 (`@openuidev/lang-core` 1.1.0,

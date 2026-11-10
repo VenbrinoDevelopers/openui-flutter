@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_highlight/flutter_highlight.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:openui_lang/openui_lang.dart';
 
@@ -133,9 +134,10 @@ head = InlineHeader("行内标题")
       ),
     );
     await tester.pumpAndSettle();
-    for (final text in ['折叠标题', '第一步', '弹窗标题', '普通文本', '加粗文本', '注意内容', 'print(1)', '行内标题']) {
+    for (final text in ['折叠标题', '第一步', '弹窗标题', '普通文本', '加粗文本', '注意内容', '行内标题']) {
       expect(find.text(text), findsWidgets);
     }
+    expect(tester.widget<HighlightView>(find.byType(HighlightView)).source, 'print(1)');
   });
 
   testWidgets('charts, tags, metrics and composite cards render', (tester) async {

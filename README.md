@@ -6,14 +6,17 @@ A pure-Dart Flutter renderer for OpenUI Lang 1.1 and the 82-component
 general GenUI library, aligned with `@openuidev/react-ui` 0.18.1. It
 parses Lang programs (including streamed, partial input) into an
 element tree and renders it with Flutter widgets. Charts are fully
-self-drawn; the only third-party dependency is `flutter_markdown_plus`
-for Markdown.
+self-drawn. This Jovita fork uses the pinned Venbrino `streamdown`
+fork for Markdown and syntax-highlighted code.
 
-> Status: published on pub.dev as [`openui_lang` 0.18.2](https://pub.dev/packages/openui_lang). Install with:
+> This fork is consumed from Git and is not published to pub.dev. The upstream 0.18.2 release remains available on [pub.dev](https://pub.dev/packages/openui_lang). Install this fork with:
 >
 > ```yaml
 > dependencies:
->   openui_lang: ^0.18.2
+>   openui_lang:
+>     git:
+>       url: https://github.com/VenbrinoDevelopers/openui-flutter.git
+>       ref: <tested-commit>
 > ```
 
 ## Quick start
@@ -190,8 +193,8 @@ That coupling is a known trade-off, not an oversight.
   a single-hue blue ramp (OCEAN). Pass `chartPalette` to match.
 - **No entrance animations.** React's are off by default as well.
 - **onClick is direct-widget-only**, as described above.
-- **Markdown** comes from `flutter_markdown_plus`;
-  **CodeBlock is plain text** (no syntax highlighting dependency).
+- **Markdown and CodeBlock** use Streamdown. CodeBlock has syntax
+  highlighting, a language label, and copy.
 - **No pixel-level parity check against React rendering exists.**
   Goldens compare Flutter against itself, and the test font is
   Ahem (all text renders as blocks), so font metrics, sizes, and

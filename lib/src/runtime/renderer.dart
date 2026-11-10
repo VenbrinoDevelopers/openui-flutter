@@ -3,7 +3,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
-import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
+import 'package:streamdown/streamdown.dart';
 
 import 'controller.dart';
 import '../charts/charts.dart';
@@ -1151,7 +1151,7 @@ Widget _buildTextContent(BuildContext context, ElementNode node, RendererContext
 }
 
 Widget _buildMarkDownRenderer(BuildContext context, ElementNode node, RendererContext ctx) {
-  final body = _MarkdownWidget(text: node.stringOf('textMarkdown'));
+  final body = _MarkdownWidget(text: node.stringOf('textMarkdown'), streaming: ctx.isStreaming);
   return switch (node.stringOf('variant', 'clear')) {
     'card' => Card(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(ctx.theme.cardRadius)),
@@ -1737,20 +1737,21 @@ Widget _buildIconText(BuildContext context, ElementNode node, RendererContext ct
 }
 
 Widget _buildCodeBlock(BuildContext context, ElementNode node, RendererContext ctx) {
-  // Plain text by decision (no highlighting); language is shown
-  // as a caption above the code.
-  return Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      Text(node.stringOf('language'), style: const TextStyle(color: Colors.grey, fontSize: 12)),
-      Container(
-        width: double.infinity,
-        margin: const EdgeInsets.symmetric(vertical: 6),
-        padding: const EdgeInsets.all(10),
-        color: Colors.grey.shade100,
-        child: Text(node.stringOf('codeString'), style: const TextStyle(fontFamily: 'monospace', fontSize: 13)),
-      ),
-    ],
+  final code = node.stringOf('codeString');
+  final language = node.stringOf('language').replaceAll(RegExp(r'[^A-Za-z0-9_+.-]'), '');
+  // A fence longer than any run in the source keeps model-provided code intact.
+  final longestRun = RegExp(r'`+').allMatches(code).fold<int>(0, (n, match) => math.max(n, match.end - match.start));
+  final fence = '`' * math.max(3, longestRun + 1);
+  final markdown = '$fence$language\n$code${code.endsWith('\n') ? '' : '\n'}$fence';
+  return Padding(
+    padding: const EdgeInsets.symmetric(vertical: 6),
+    child: Streamdown.text(
+      markdown,
+      animated: false,
+      showCaret: false,
+      parseIncompleteMarkdown: false,
+      lineNumbers: false,
+    ),
   );
 }
 
@@ -2512,19 +2513,21 @@ class _Skeleton extends StatelessWidget {
   }
 }
 
-// ---------------- Markdown (flutter_markdown_plus) ----------------
-// MarkDownRenderer now uses the flutter_markdown_plus package (full
-// Markdown: headings, lists, tables, links, code blocks, inline code,
-// bold/italic, blockquotes, etc.) instead of the previous hand-written
-// subset. MarkdownBody sizes to its content, so it fits inside the
-// renderer's Column without its own scroll view.
+// ---------------- Markdown (Streamdown) ----------------
 
 class _MarkdownWidget extends StatelessWidget {
-  const _MarkdownWidget({required this.text});
+  const _MarkdownWidget({required this.text, required this.streaming});
   final String text;
+  final bool streaming;
   @override
   Widget build(BuildContext context) {
-    return MarkdownBody(data: text);
+    return Streamdown.text(
+      text,
+      animated: false,
+      showCaret: false,
+      parseIncompleteMarkdown: streaming,
+      lineNumbers: false,
+    );
   }
 }
 

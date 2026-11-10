@@ -1,5 +1,6 @@
 name: openui_lang
-description: Flutter port of OpenUI Lang 1.1 with a renderer for the 82-component general GenUI library. Markdown rendering uses flutter_markdown_plus; charts are self-drawn.
+publish_to: none
+description: Flutter port of OpenUI Lang 1.1 with a renderer for the 82-component general GenUI library. Markdown and code rendering use Streamdown; charts are self-drawn.
 version: 0.18.2
 repository: https://github.com/titanseason/openui-flutter
 homepage: https://github.com/titanseason/openui-flutter
@@ -9,7 +10,10 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  flutter_markdown_plus: ^1.0.12
+  streamdown:
+    git:
+      url: https://github.com/venbrinoDev/streamdown.git
+      ref: abcb26ea9f13f1cec6f526683c198123e4763a46
 dev_dependencies:
   flutter_test:
     sdk: flutter
