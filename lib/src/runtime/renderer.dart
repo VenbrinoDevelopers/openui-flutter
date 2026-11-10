@@ -36,7 +36,7 @@ typedef BuiltinBuilder = Widget Function(
 /// state class implements it by delegating to its private members;
 /// a builder can be unit-tested against a fake of this interface
 /// without a renderer.
-abstract class RendererContext {
+abstract class RendererContext implements OpenUIBuilderHost {
   OpenUIThemeData get theme;
   ChartColors get chartColors;
   bool get isStreaming;
@@ -304,7 +304,8 @@ class _OpenUIRendererState extends State<OpenUIRenderer>
   }
   @override
   bool hasCustomBuilder(String component) =>
-      _effectiveRegistry?.lookup(component) != null;
+      _effectiveRegistry?.lookup(component) != null ||
+      _effectiveRegistry?.lookupHost(component) != null;
   @override
   Future<void> dispatch(Object? action) => _dispatch(action);
   @override
@@ -630,6 +631,11 @@ class _OpenUIRendererState extends State<OpenUIRenderer>
     // Lookup order: explicit registry first, controller/library
     // registry second (see _effectiveRegistry), the built-in
     // map third, empty last (never a crash).
+    final hostBuilder = _effectiveRegistry?.lookupHost(node.component);
+    if (hostBuilder != null) {
+      _customBuilderUsed = true;
+      return hostBuilder(context, node, _buildNode, this);
+    }
     final builder = _effectiveRegistry?.lookup(node.component);
     if (builder != null) {
       // A subtree that ran a custom builder is never cached, since

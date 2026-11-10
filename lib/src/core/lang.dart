@@ -187,10 +187,12 @@ class MutationRequest {
 }
 
 class ElementNode {
-  const ElementNode(this.component, this.props, this.statementId);
+  const ElementNode(this.component, this.props, this.statementId, {this.bindings = const {}});
   final String component;
   final Map<String, Object?> props;
   final String statementId;
+  /// Original `$state` references supplied to component props.
+  final Map<String, String> bindings;
   List<ElementNode> nodesOf(String prop) {
     final v = props[prop];
     if (v is ElementNode) return [v];
@@ -760,6 +762,7 @@ class OpenUILibrary {
     List<FunctionDef> functions = const [],
     List<ActionDef> actions = const [],
     Map<String, OpenUIComponentBuilder> builders = const {},
+    Map<String, OpenUIHostComponentBuilder> hostBuilders = const {},
   }) {
     final byName = <String, ComponentDef>{for (final c in this.components) c.name: c};
     final addedNames = {for (final c in components) c.name};
@@ -776,10 +779,13 @@ class OpenUILibrary {
       actByName[a.name] = a;
     }
     var nextRegistry = this.registry;
-    if (builders.isNotEmpty) {
+    if (builders.isNotEmpty || hostBuilders.isNotEmpty) {
       var merged = nextRegistry ?? const ComponentRegistry();
       for (final entry in builders.entries) {
         merged = merged.withBuilder(entry.key, entry.value);
+      }
+      for (final entry in hostBuilders.entries) {
+        merged = merged.withHostBuilder(entry.key, entry.value);
       }
       nextRegistry = merged;
     }
@@ -1162,7 +1168,7 @@ class _Evaluator {
     // like upstream's withStatementId, so two statements never share
     // one node's key. Inline (non-statement) nodes keep ''.
     if (v is ElementNode) {
-      v = ElementNode(v.component, v.props, name);
+      v = ElementNode(v.component, v.props, name, bindings: v.bindings);
     }
     _memo[name] = v;
     return v;
@@ -2007,6 +2013,7 @@ class _Evaluator {
       _err(OpenUIError('excess-args', 'too many args for ${e.name}'));
     }
     final props = <String, Object?>{};
+    final bindings = <String, String>{};
     var dropped = false;
     for (var i = 0; i < def.props.length; i++) {
       final prop = def.props[i];
@@ -2014,6 +2021,7 @@ class _Evaluator {
       var present = false;
       if (i < e.args.length) {
         present = true;
+        if (e.args[i] is VarExpr) bindings[prop.name] = (e.args[i] as VarExpr).name;
         final isActionProp = prop.type == PropType.action || prop.type == PropType.actionList;
         value = evalExpr(e.args[i], isActionProp);
         if (prop.type == PropType.actionList && value is ActionValue) value = [value];
@@ -2279,7 +2287,7 @@ class _Evaluator {
         }
       }
     if (dropped) return null;
-    return ElementNode(e.name, props, '');
+    return ElementNode(e.name, props, '', bindings: bindings);
   }
 
   bool _typeOk(PropType t, Object? v) => switch (t) {

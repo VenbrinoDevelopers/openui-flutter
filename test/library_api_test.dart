@@ -42,6 +42,29 @@ void main() {
     expect(lib.registry!.lookup('B'), isNotNull);
   });
 
+  testWidgets('host builders can update bound state and dispatch actions', (tester) async {
+    final library = openUIStandardLibrary().extend(
+      components: [
+        const ComponentDef('CounterInput', 'Bound counter', [PropDef('value', PropType.any, required: true)]),
+      ],
+      hostBuilders: {
+        'CounterInput': (context, node, renderChild, host) => TextButton(
+          onPressed: () => host.setValue(node.bindings['value']!, (node.props['value'] as num) + 1),
+          child: Text('${node.props['value']}'),
+        ),
+      },
+    );
+    await tester.pumpWidget(MaterialApp(home: Scaffold(body: OpenUIRenderer(
+      library: library,
+      response: r'''root = CounterInput($count)
+$count = 1''',
+    ))));
+    expect(find.text('1'), findsOneWidget);
+    await tester.tap(find.text('1'));
+    await tester.pump();
+    expect(find.text('2'), findsOneWidget);
+  });
+
   test('openUIStandardLibrary matches openUIMvpLibrary', () {
     final a = openUIStandardLibrary();
     // ignore: deprecated_member_use — this test pins the alias itself.
