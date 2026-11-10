@@ -152,7 +152,7 @@ root = TextContent("总数: " + @Sum(sales) + ", 开放: " + @Count(@Filter(rows
 sales = ["1", 2]
 rows = [{"status": "open"}, {"status": "closed"}, {"status": "open"}]
 ''', library);
-    expect(r.root!.stringOf('text'), '总数: 3.0, 开放: 2');
+    expect(r.root!.stringOf('text'), '总数: 3, 开放: 2');
     final each = parseOpenUI('''
 root = Stack([tags])
 tags = @Each(rows, "t", TextContent(t.priority))

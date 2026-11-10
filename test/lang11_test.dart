@@ -49,12 +49,17 @@ void main() {
           '1.3');
       expect(
           textOf(parseOpenUI('root = TextContent("" + @Abs(-5))', library)),
-          '5.0');
+          '5');
       expect(
           textOf(parseOpenUI('root = TextContent("" + @Round("bad"))',
               library)),
           '');
     });
+  });
+
+  test('whole-number results concatenate without a decimal suffix', () {
+    final r = parseOpenUI('root = TextContent(@Floor(540 / 60) + ":00")', library);
+    expect(textOf(r), '9:00');
   });
 
   group('state defaults are evaluated once at parse time', () {
@@ -71,14 +76,14 @@ void main() {
           state: {'price': 200});
       // The default freezes the earlier default (100), not the host
       // value (200); a value that should follow is a plain statement.
-      expect(textOf(r), '18.0');
+      expect(textOf(r), '18');
     });
 
     test('plain statement follows host state', () {
       final r = parseOpenUI(
           'tax = \$price * 0.18\nroot = TextContent("" + tax)', library,
           state: {'price': 200});
-      expect(textOf(r), '36.0');
+      expect(textOf(r), '36');
     });
 
     test('a state declared after reads as null', () {
@@ -350,7 +355,7 @@ root = Stack([a, b])
     test('division is not a comment', () {
       final r = parseOpenUI(
           'v = 10 / 2\nroot = TextContent("" + v)', library);
-      expect(textOf(r), '5.0');
+      expect(textOf(r), '5');
     });
   });
 

@@ -1551,7 +1551,15 @@ class _Evaluator {
     return null;
   }
 
-  String _str(Object? v) => v == null ? '' : '$v';
+  String _str(Object? v) {
+    if (v == null) return '';
+    // OpenUI uses JavaScript-style concatenation. Dart adds ".0" to a
+    // whole-number double, corrupting labels built from arithmetic.
+    if (v is double && v.isFinite && v == v.truncateToDouble() && v.abs() < 9007199254740992) {
+      return v.toInt().toString();
+    }
+    return '$v';
+  }
 
   /// JavaScript truthiness: null, false, 0/NaN and '' are falsy;
   /// everything else (including lists, maps and sentinels) is truthy.
