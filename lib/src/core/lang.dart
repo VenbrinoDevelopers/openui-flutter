@@ -473,7 +473,7 @@ class _ExprParser {
   _Token get cur => tokens[pos];
   _Token next() => tokens[pos++];
   bool eat(String text) {
-    if (cur.text == text) {
+    if (cur.kind == 'punct' && cur.text == text) {
       pos++;
       return true;
     }
@@ -503,7 +503,7 @@ class _ExprParser {
 
   Expr _binary(Expr Function() sub, List<String> ops) {
     var e = sub();
-    while (ops.contains(cur.text)) {
+    while (cur.kind == 'punct' && ops.contains(cur.text)) {
       final op = next().text;
       final r = sub();
       e = BinaryExpr(op, e, r);
@@ -519,7 +519,7 @@ class _ExprParser {
   Expr parseMul() => _binary(parseUnary, ['*', '/', '%']);
 
   Expr parseUnary() {
-    if (cur.text == '!' || cur.text == '-') {
+    if (cur.kind == 'punct' && (cur.text == '!' || cur.text == '-')) {
       final op = next().text;
       return UnaryExpr(op, parseUnary());
     }
@@ -2053,9 +2053,14 @@ class _Evaluator {
       }
       if (value == null && present) {
         if (prop.required && prop.defaultValue == null) {
-          _err(OpenUIError('null-required', 'null required prop ${prop.name} on ${e.name}'));
-          dropped = true;
-          continue;
+          // App-owned libraries often bind an initially empty input or a
+          // computed title to a value that becomes available later. Keep
+          // the node so its widget can render an empty state and update.
+          if (library.strictGeneralUnions || e.args[i] is LiteralExpr) {
+            _err(OpenUIError('null-required', 'null required prop ${prop.name} on ${e.name}'));
+            dropped = true;
+            continue;
+          }
         }
         value = prop.defaultValue;
       }
@@ -2340,8 +2345,8 @@ ParseResult parseOpenUI(String text, OpenUILibrary library, {Map<String, Object?
       final expr = _ExprParser(_tokenize(exprText)).parse();
       if (!statements.containsKey(name)) order.add(name);
       statements[name] = _Statement(name, expr); // last wins
-    } catch (_) {
-      errors.add(OpenUIError('parse-failed', 'cannot parse statement $name'));
+    } catch (error) {
+      errors.add(OpenUIError('parse-failed', 'cannot parse statement $name: $error'));
     }
   }
   final graph = analyzeQueryGraph(statements, order);
