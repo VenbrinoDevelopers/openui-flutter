@@ -712,7 +712,7 @@ const builtinFunctionNames = {
 };
 
 class OpenUILibrary {
-  OpenUILibrary({required this.components, required this.root, this.functions = const [], this.actions = const [], this.registry}) {
+  OpenUILibrary({required this.components, required this.root, this.functions = const [], this.actions = const [], this.registry, this.strictGeneralUnions = false}) {
     // Built-ins are looked up first, so a library must not reuse their names.
     for (final f in functions) {
       if (builtinActionNames.contains(f.name) || builtinFunctionNames.contains(f.name)) {
@@ -740,6 +740,9 @@ class OpenUILibrary {
   final String root;
   final List<FunctionDef> functions;
   final List<ActionDef> actions;
+  /// Apply the React general catalog's content unions. Custom app catalogs
+  /// can reuse names such as Card and Carousel with different child types.
+  final bool strictGeneralUnions;
 
   /// Builders for custom components, supplied via [extend]. The
   /// renderer checks an explicit `registry` argument first, then this
@@ -795,6 +798,7 @@ class OpenUILibrary {
       functions: fnByName.values.toList(),
       actions: actByName.values.toList(),
       registry: nextRegistry,
+      strictGeneralUnions: strictGeneralUnions,
     );
   }
 
@@ -2211,8 +2215,9 @@ class _Evaluator {
     for (final entry in (listUnions[e.name] ?? {}).entries) {
       filterNodes(entry.key, entry.value);
     }
-    // Content unions (React unions.ts): with a single library
-    // they apply to every program.
+    // Content unions are specific to the general catalog. App-owned
+    // libraries reuse names such as Card with different child unions.
+    if (library.strictGeneralUnions) {
       // General-library content unions (React unions.ts).
       const contentChildUnion = {
         'TextContent',
@@ -2286,6 +2291,7 @@ class _Evaluator {
           props['children'] = keptSlides;
         }
       }
+    }
     if (dropped) return null;
     return ElementNode(e.name, props, '', bindings: bindings);
   }

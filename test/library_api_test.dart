@@ -65,6 +65,16 @@ $count = 1''',
     expect(find.text('2'), findsOneWidget);
   });
 
+  test('custom catalogs can reuse Card with their own child union', () {
+    final library = OpenUILibrary(root: 'Card', components: const [
+      ComponentDef('Card', 'Custom card', [PropDef('children', PropType.nodeList, required: true)]),
+      ComponentDef('Title', 'Custom title', [PropDef('text', PropType.string, required: true)]),
+    ]);
+    final result = parseOpenUI('root = Card([Title("Hello")])', library);
+    expect(result.root?.nodesOf('children').single.component, 'Title');
+    expect(result.errors, isEmpty);
+  });
+
   test('openUIStandardLibrary matches openUIMvpLibrary', () {
     final a = openUIStandardLibrary();
     // ignore: deprecated_member_use — this test pins the alias itself.

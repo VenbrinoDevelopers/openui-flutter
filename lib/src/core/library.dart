@@ -543,6 +543,7 @@ OpenUILibrary openUIStandardLibrary({String root = 'Stack', List<FunctionDef> fu
     root: root,
     functions: functions,
     components: _baseComponents(),
+    strictGeneralUnions: true,
   );
 }
 
